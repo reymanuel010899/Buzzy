@@ -81,5 +81,5 @@ class RegisterView(APIView):
                 "id": user.id,
                 "username": user.username,
                 "email": user.email
-            }
+            },
         }, status=status.HTTP_201_CREATED)

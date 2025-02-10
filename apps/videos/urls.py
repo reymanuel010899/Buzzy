@@ -1,6 +1,7 @@
 from django.urls import path
-app_name = 'users'
+from . import views
+app_name = 'video'
 
 urlpatterns = [
-    # path('', )
+    path('api/list-home/', views.ListMediaApiView.as_view(), name='media-home' )
 ]
