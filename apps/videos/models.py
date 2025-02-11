@@ -1,8 +1,40 @@
 from django.db import models
 from apps.users.models import User
+from django.utils.text import slugify
+
+class Category(models.Model):
+    name = models.CharField(max_length=255, unique=True)
+    slug = models.SlugField(unique=True, blank=True, null=True)
+    description = models.TextField(blank=True, null=True)
+    parent = models.ForeignKey('self', related_name='subcategories', on_delete=models.SET_NULL, blank=True, null=True)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True) 
+    updated_at = models.DateTimeField(auto_now=True)
+    image = models.ImageField(upload_to='categories/', blank=True, null=True)
+    order = models.PositiveIntegerField(default=0)
+    seo_title = models.CharField(max_length=255, blank=True, null=True) 
+    seo_description = models.TextField(blank=True, null=True) 
+
+    def save(self, *args, **kwargs):
+        if not self.slug: 
+            self.slug = slugify(self.name)
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"Category {self.id} - {self.name}"
+
+    class Meta:
+        verbose_name = 'Category'
+        verbose_name_plural = 'Categories'
+        ordering = ['order', 'name']
+        indexes = [
+            models.Index(fields=['name']),
+            models.Index(fields=['slug']),
+        ]
 
 class Video(models.Model):
-    user_id = models.ForeignKey(User, on_delete=models.CASCADE)  # Referencia al usuario que sube el video
+    user_id = models.ForeignKey(User, on_delete=models.CASCADE,  )  # Referencia al usuario que sube el video
+    category = models.ForeignKey(Category, on_delete=models.CASCADE, blank=True, null=True)
     video_url = models.URLField()  # URL o ruta del archivo de video
     thumbnail_url = models.URLField()  # URL o ruta de la miniatura del video
     description = models.TextField()  # Descripción del video
