@@ -48,7 +48,8 @@ TRHE_PARTY_APPS = [
 ]
 LOCAL_APPS = [
     'apps.users',
-    'apps.videos'
+    'apps.videos',
+    'apps.wallet'
 ]
 
 INSTALLED_APPS  = DJANGO_APPS + TRHE_PARTY_APPS + LOCAL_APPS
