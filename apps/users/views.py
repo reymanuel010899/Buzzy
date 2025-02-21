@@ -15,7 +15,7 @@ class LoginView(APIView):
         password = request.data.get('password')
         user = User.objects.filter(email=email).first()
         if self.request.user and user.check_password(password):
-            refresh = RefreshToken.for_user(user)  # Generar tokens para el usuario
+            refresh = RefreshToken.for_user(user)
             return Response({
                 "refresh": str(refresh),
                 "access": str(refresh.access_token),
