@@ -36,6 +36,7 @@ class Video(models.Model):
     user_id = models.ForeignKey(User, on_delete=models.CASCADE,  )  # Referencia al usuario que sube el video
     category = models.ForeignKey(Category, on_delete=models.CASCADE, blank=True, null=True)
     video_url = models.URLField()  # URL o ruta del archivo de video
+    video = models.FileField(upload_to='contenido/', blank=True, null=True)
     thumbnail_url = models.URLField()  # URL o ruta de la miniatura del video
     description = models.TextField()  # Descripción del video
     tags = models.JSONField()  # Etiquetas asociadas al video (puede ser una lista)

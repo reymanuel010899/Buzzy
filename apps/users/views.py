@@ -7,9 +7,9 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework import status
 from rest_framework.exceptions import ValidationError
 from .models import User
-from .serializers import LoginZerializer
+from .serializers import LoginZerializer, DetailedUserSerializer
 class LoginView(APIView):
-    authentication_class = (TokenAuthentication,)
+    # authentication_class = (TokenAuthentication,)
     def post(self, request):
         email = request.data.get('email')
         password = request.data.get('password')
@@ -22,7 +22,8 @@ class LoginView(APIView):
                 "user": {
                     "id": user.id,
                     "username": user.username,
-                    "email": user.email
+                    "email": user.email,
+                       "profile_picture": user.profile_picture.url if user.profile_picture else 'http://localhost:8000/media/profile_pics/avatar.webp',
                 }
             }, status=status.HTTP_200_OK)
         else:
@@ -80,6 +81,18 @@ class RegisterView(APIView):
             "user": {
                 "id": user.id,
                 "username": user.username,
-                "email": user.email
+                "email": user.email,
+                "profile_picture": user.profile_picture.url if user.profile_picture else 'http://localhost:8000/media/profile_pics/avatar.webp',
             },
         }, status=status.HTTP_201_CREATED)
+    
+class DetaildUser(APIView):
+    serializer_class = DetailedUserSerializer
+    permission_classes = [IsAuthenticated]
+    def get(self, request):
+        serialised_user = self.serializer_class(request.user)
+        user = request.user
+        return Response({
+            "user":  serialised_user.data,
+            "profile_picture": user.profile_picture.url if user.profile_picture else 'http://localhost:8000/media/profile_pics/avatar.webp',
+        }, status=status.HTTP_200_OK)

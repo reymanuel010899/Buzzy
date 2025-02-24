@@ -10,6 +10,7 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/4.2/ref/settings/
 """
 import os
+import secrets
 from datetime import timedelta
 from pathlib import Path
 from dotenv import load_dotenv
@@ -22,12 +23,13 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # See https://docs.djangoproject.com/en/4.2/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = os.getenv('SECRET_KEY')
+SECRET_KEY = os.getenv('SECRET_KEY', default=secrets.token_urlsafe(50))
 
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = []
+# ALLOWED_HOSTS = []
+ALLOWED_HOSTS = ['*']
 
 
 # Application definition
@@ -49,7 +51,8 @@ TRHE_PARTY_APPS = [
 LOCAL_APPS = [
     'apps.users',
     'apps.videos',
-    'apps.wallet'
+    'apps.wallet',
+    'apps.markerplace'
 ]
 
 INSTALLED_APPS  = DJANGO_APPS + TRHE_PARTY_APPS + LOCAL_APPS
@@ -130,7 +133,7 @@ SIMPLE_JWT = {
     'REFRESH_TOKEN_LIFETIME': timedelta(days=7),
     'ROTATE_REFRESH_TOKENS': True,
     'BLACKLIST_AFTER_ROTATION': True,
-    'AUTH_HEADER_TYPES': ('Bearer',),  # Token en el header como "Bearer <token>"
+    'AUTH_HEADER_TYPES': ('Bearer',),
 }
 
 # Internationalization
@@ -149,8 +152,27 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/4.2/howto/static-files/
 
 STATIC_URL = 'static/'
+STATICFILES_DIRS = [
+    BASE_DIR / "static",
+]
+MEDIA_URL = 'media/'
+MEDIA_ROOT = BASE_DIR / 'media'
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/4.2/ref/settings/#default-auto-field
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+
+SESSION_COOKIE_SECURE = True  
+SESSION_COOKIE_HTTPONLY = True  
+CSRF_COOKIE_SECURE = True  
+CSRF_COOKIE_HTTPONLY = True  
+
+
+#*********************** enable when i have domain *************************
+# SECURE_BROWSER_XSS_FILTER = True  # Enables XSS protection in browsers
+# SECURE_CONTENT_TYPE_NOSNIFF = True  # Prevents MIME-type sniffing
+# SECURE_SSL_REDIRECT = True  # Redirect all HTTP requests to HTTPS
+# SECURE_HSTS_SECONDS = 31536000  # Enforce HTTPS for 1 year (adjust as needed)
+# SECURE_HSTS_INCLUDE_SUBDOMAINS = True  # Apply HSTS to subdomains
+# SECURE_HSTS_PRELOAD = True  # Allow browser preloading of HSTS policy
