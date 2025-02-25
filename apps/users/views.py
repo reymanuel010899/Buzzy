@@ -1,11 +1,11 @@
-from django.contrib.auth import authenticate
 from rest_framework.permissions import IsAuthenticated
-from rest_framework.authentication import   TokenAuthentication
+from rest_framework.authentication import TokenAuthentication
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework import status
-from rest_framework.exceptions import ValidationError
+from apps.videos.serializers import  VideoZerializer
+from apps.videos.models import Video
 from .models import User
 from .serializers import LoginZerializer, DetailedUserSerializer
 class LoginView(APIView):
@@ -91,8 +91,22 @@ class DetaildUser(APIView):
     permission_classes = [IsAuthenticated]
     def get(self, request):
         serialised_user = self.serializer_class(request.user)
-        user = request.user
         return Response({
             "user":  serialised_user.data,
-            "profile_picture": user.profile_picture.url if user.profile_picture else 'http://localhost:8000/media/profile_pics/avatar.webp',
         }, status=status.HTTP_200_OK)
+    
+class MediaByUser(APIView):
+    serializer_class =  VideoZerializer
+    # authentication_classes = [TokenAuthentication]
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        print(f"Token recibido: {request.META.get('HTTP_AUTHORIZATION')}")  # Verifica el encabezado
+        print(f"Usuario: {request.user}, Autenticado: {request.user.is_authenticated}")
+        media = Video.objects.filter(user_id=request.user)
+        serialised_user = self.serializer_class(media, many=True)
+        return Response({
+            "media_user":  serialised_user.data,
+        }, status=status.HTTP_200_OK)
+
+

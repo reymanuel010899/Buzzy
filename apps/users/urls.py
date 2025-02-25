@@ -11,4 +11,5 @@ urlpatterns = [
     path('api/login/', views.LoginView.as_view(), name='login'),
     path('api/logout/', views.LogoutView.as_view(), name='logout'),
     path('api/get-user/', views.DetaildUser.as_view(), name='get-user'),
+    path('api/get-media-user/', views.MediaByUser.as_view(), name='get-media-user'),
 ]
