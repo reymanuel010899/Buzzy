@@ -89,8 +89,9 @@ class RegisterView(APIView):
 class DetaildUser(APIView):
     serializer_class = DetailedUserSerializer
     permission_classes = [IsAuthenticated]
-    def get(self, request):
-        serialised_user = self.serializer_class(request.user)
+    def get(self, request, username, *args, **kwargs):
+        user = User.objects.get(username=username)
+        serialised_user = self.serializer_class(user)
         return Response({
             "user":  serialised_user.data,
         }, status=status.HTTP_200_OK)
@@ -100,10 +101,9 @@ class MediaByUser(APIView):
     # authentication_classes = [TokenAuthentication]
     permission_classes = [IsAuthenticated]
 
-    def get(self, request):
-        print(f"Token recibido: {request.META.get('HTTP_AUTHORIZATION')}")  # Verifica el encabezado
-        print(f"Usuario: {request.user}, Autenticado: {request.user.is_authenticated}")
-        media = Video.objects.filter(user_id=request.user)
+    def get(self, request, username):
+        user = User.objects.get(username=username)
+        media = Video.objects.filter(user_id=user)
         serialised_user = self.serializer_class(media, many=True)
         return Response({
             "media_user":  serialised_user.data,

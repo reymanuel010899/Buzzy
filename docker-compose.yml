@@ -1,0 +1,12 @@
+version: '22'
+services:
+  db: 
+    image: "postgres:latest"
+    environment:
+      - POSTGRES_NAME=byzzy_name
+      - POSTGRES_DB=buzzy_db
+      - POSTGRES_PASSWORD=buzzy_password
+
+    ports:
+      - "5432:5432"
+

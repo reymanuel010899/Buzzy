@@ -22,3 +22,18 @@ class User(AbstractBaseUser, PermissionsMixin):
 
     def __str__(self):
         return self.username
+    
+    def all_followers(self):
+        return self.following.all()
+    
+    def all_likes(self):
+        total = sum(like.like_video_reverce.count() for like in self.user_reverce.all())
+        return total
+
+    def all_comments(self):
+        total = sum(comment.comernt_video_reverce.count() for comment in self.user_reverce.all())
+        return total
+
+    def all_views(self):
+        total = sum(video.video_reverce.count() for video in self.user_reverce.all())
+        return total

@@ -33,7 +33,7 @@ class Category(models.Model):
         ]
 
 class Video(models.Model):
-    user_id = models.ForeignKey(User, on_delete=models.CASCADE,  )  # Referencia al usuario que sube el video
+    user_id = models.ForeignKey(User, on_delete=models.CASCADE, related_name='user_reverce' )  # Referencia al usuario que sube el video
     category = models.ForeignKey(Category, on_delete=models.CASCADE, blank=True, null=True)
     video_url = models.URLField()  # URL o ruta del archivo de video
     video = models.FileField(upload_to='contenido/', blank=True, null=True)
