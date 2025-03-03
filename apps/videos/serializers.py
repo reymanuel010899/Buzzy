@@ -22,5 +22,24 @@ class VideoZerializer(serializers.ModelSerializer):
         return obj.get_count_comment()
     
     def get_view_acount(self, obj):
-        print(obj.get_count_view(), "********")
         return obj.get_count_view()
+
+
+class VideoSerializerMeta(serializers.ModelSerializer):
+    user_id = serializers.PrimaryKeyRelatedField(queryset=User.objects.all())  # ✅ Corrección aquí()
+    class Meta:
+        model = Video
+        fields = ("id","category", "created_at",  "description","thumbnail_url", "user_id", "video_url", "video") 
+
+
+class videoSerializerDetail(serializers.Serializer):
+    video = serializers.CharField()
+    video_url = serializers.CharField()
+    thumbnail_url = serializers.CharField()
+    video_id = serializers.CharField()
+    created_at = serializers.CharField()
+
+    #  class Meta:
+    #     model = Video
+    #     fields = ("id","category", "created_at",  "description",
+    #                "duration","thumbnail_url", "user_id", "video_url", "video", "like_count", "comments_count", "view_acount") 

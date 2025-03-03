@@ -23,7 +23,7 @@ class LoginView(APIView):
                     "id": user.id,
                     "username": user.username,
                     "email": user.email,
-                       "profile_picture": user.profile_picture.url if user.profile_picture else 'http://localhost:8000/media/profile_pics/avatar.webp',
+                       "profile_picture": user.profile_picture.url if user.profile_picture else 'media/profile_pics/avatar.webp',
                 }
             }, status=status.HTTP_200_OK)
         else:

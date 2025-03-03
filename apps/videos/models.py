@@ -43,6 +43,8 @@ class Video(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)  # Fecha de subida del video
     updated_at = models.DateTimeField(auto_now=True)  # Fecha de la última modificación
     duration = models.PositiveIntegerField()  # Duración del video en segundos
+    latitude = models.FloatField(null=True, blank=True)
+    longitude = models.FloatField(null=True, blank=True)
 
 
     def get_count_view(self):
