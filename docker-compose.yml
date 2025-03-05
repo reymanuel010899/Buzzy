@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 version: '22'
 services:
   db: 
@@ -10,3 +11,28 @@ services:
     ports:
       - "5432:5432"
 
+=======
+version: '27.5.0'
+
+services:
+  db:
+    image: "postgres:alpine"
+    environment:
+      - POSTGRES_DB=buzzy_db
+      - POSTGRES_USER=buzzy_user
+      - POSTGRES_PASSWORD=reymanuel010899
+    ports:
+      - "5432:5434"
+
+  web: 
+    build: .
+    command: python3 manage.py runserver 0.0.0.0:8000
+    volumes:
+      - .:/buzzy-backend
+    
+    ports:
+      - "8000:8000"
+    
+    depends_on:
+      - db
+>>>>>>> f506f38 (cambios)

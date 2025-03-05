@@ -30,7 +30,7 @@ SECRET_KEY = os.getenv('SECRET_KEY')
 DEBUG = True
 
 # ALLOWED_HOSTS = []
-ALLOWED_HOSTS = ['*']
+ALLOWED_HOSTS = ["*"]
 
 
 # Application definition
@@ -92,6 +92,7 @@ WSGI_APPLICATION = 'Buzzy.wsgi.application'
 
 CORS_ALLOWED_ORIGINS = [
     "http://localhost:5173",
+    "http://10.0.0.41:5173"
 ]
 # Database
 # https://docs.djangoproject.com/en/4.2/ref/settings/#databases
