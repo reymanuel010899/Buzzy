@@ -6,3 +6,5 @@ secretos
 media
 video*.mp4
 media/stories/media/*.mp4
+*-firebase-adminsdk-*.json
+serviceAccountKey*.json

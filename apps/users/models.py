@@ -1,3 +1,4 @@
+from django.utils import timezone
 from django.contrib.auth.models import AbstractBaseUser, BaseUserManager, PermissionsMixin
 from django.db import models
 from .manayers import CustomUserManager
@@ -17,12 +18,18 @@ class User(AbstractBaseUser, PermissionsMixin):
     first_name = models.CharField(max_length=30, blank=True)
     last_name = models.CharField(max_length=30, blank=True)
     birthdate = models.DateField(null=True, blank=True)
-    profile_picture = models.ImageField(upload_to='media/profile_pics/', default='media/profile_pics/avatar.webp',  null=True, blank=True)
-    profile_video = models.FileField(upload_to='media/profile_videos/', null=True, blank=True)
+    profile_picture = models.ImageField(upload_to='profile_pics/photo/', default='profile_pics/avatar.webp',  null=True, blank=True)
+    profile_video = models.FileField(upload_to='profile_videos/video/', null=True, blank=True)
     country = models.ForeignKey(Country, on_delete=models.SET_NULL, null=True, blank=True)
+    phone_number = models.CharField(max_length=20, null=True, blank=True)
+    is_phone_verified = models.BooleanField(default=False)
     bio = models.TextField(null=True, blank=True)
     is_active = models.BooleanField(default=True)
     is_staff = models.BooleanField(default=False)
+
+    # Recovery codes
+    reset_password_code = models.CharField(max_length=6, null=True, blank=True)
+    reset_password_expires = models.DateTimeField(null=True, blank=True)
 
     objects = CustomUserManager()
 
@@ -52,8 +59,22 @@ class User(AbstractBaseUser, PermissionsMixin):
 
     def all_views(self):
         total = sum(video.video_reverce.count() for video in self.user_reverce.all())
+        total = sum(video.video_reverce.count() for video in self.user_reverce.all())
         return total
     
+    def is_currently_available(self):
+        """Checks if the user is currently within any of their active availability slots."""
+        now = timezone.localtime()
+        current_day = now.weekday()
+        current_time = now.time().replace(tzinfo=None, microsecond=0)
+        print(f"Checking  availability for {self.username} at {current_day} {current_time}")
+        print("local time:", self.availabilities.filter(day_of_week=current_day,  is_active=True,start_time__lte=current_time,))
+        return self.availabilities.filter(
+            day_of_week=current_day,
+            is_active=True,
+            start_time__lte=current_time,
+            end_time__gte=current_time
+        ).exists()
 
 class Trending(models.Model):
     term = models.CharField(max_length=255, unique=True)

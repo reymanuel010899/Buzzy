@@ -1,8 +1,10 @@
+import stripe
 from rest_framework import serializers
-from .models import WalletModel, TransactionModel, BankAccount
+from .models import WalletModel, TransactionModel, BankAccount, TokenPackage
 from .utils import encrypt_data
-
+from django.conf import settings
 from apps.videos.serializers import UserSerializers
+stripe.api_key = settings.STRIPE_SECRET_KEY
 
 class WalletSerializer(serializers.ModelSerializer):
     user= UserSerializers()
@@ -21,20 +23,51 @@ class BankAccountSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'created_at']
 
     def create(self, validated_data):
+        user = self.context['request'].user
+
         account_number = validated_data.pop('account_number')
         routing_number = validated_data.pop('routing_number', "")
-        
+
         validated_data['encrypted_account_number'] = encrypt_data(account_number)
         validated_data['encrypted_routing_number'] = encrypt_data(routing_number)
-        
-        # If this is the first bank account, make it primary
-        if not BankAccount.objects.filter(user=self.context['request'].user).exists():
+
+        # crear cuenta stripe connect
+        stripe_account = stripe.Account.create(
+            type="express",
+            email=user.email,
+            country="US",
+        )
+
+        validated_data['stripe_account_id'] = stripe_account.id
+
+        # primera cuenta = primaria
+        if not BankAccount.objects.filter(user=user).exists():
             validated_data['is_primary'] = True
-            
-        return super().create(validated_data)
+
+        bank_account = BankAccount.objects.create(
+            user=user,
+            **validated_data
+        )
+
+        # crear onboarding link para que agregue su banco
+        account_link = stripe.AccountLink.create(
+            account=stripe_account.id,
+            refresh_url="https://tuapp.com/reconnect",
+            return_url="http://localhost:5173/success",
+            type="account_onboarding",
+        )
+
+        bank_account.onboarding_url = account_link.url  # temporal
+
+        return bank_account
 
 
 class TransactiosCreateSerializer(serializers.ModelSerializer):
     class Meta:
         model=TransactionModel
         fields=('transaction_type', 'amount', 'description')
+
+class TokenPackageSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = TokenPackage
+        fields = ['id', 'tokens', 'price', 'is_popular', 'color_gradient']

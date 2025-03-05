@@ -1,5 +1,7 @@
 from rest_framework import serializers
 from . import models
+from apps.subscriptions.models import UserSubscription
+from apps.subscriptions.serializers import UserSubscriptionSerializer
 
 class DetailedUserSerializer(serializers.ModelSerializer):
     like_all_count = serializers.SerializerMethodField(read_only=True)
@@ -9,18 +11,45 @@ class DetailedUserSerializer(serializers.ModelSerializer):
     total_social_followers = serializers.SerializerMethodField(read_only=True)
     followed_all_acount = serializers.SerializerMethodField(read_only=True)
     is_following = serializers.SerializerMethodField(read_only=True)
+    subscribers_count = serializers.SerializerMethodField(read_only=True)
     subscription_status = serializers.SerializerMethodField(read_only=True)
+    has_active_stories = serializers.SerializerMethodField(read_only=True)
+    profile_picture = serializers.SerializerMethodField(read_only=True)
     
     class Meta:
         model = models.User
-        fields = ('id','first_name', 'email', 'profile_picture', 'profile_video', 'like_all_count', 'comments_all_count', 'view_all_acount', 'follower_all_acount', 'total_social_followers', 'followed_all_acount', 'is_following', 'subscription_status')
+        fields = ('id','username', 'first_name', 'email', 'profile_picture', 'profile_video', 'like_all_count', 'comments_all_count', 'view_all_acount', 'follower_all_acount', 'total_social_followers', 'followed_all_acount', 'is_following', 'subscribers_count', 'subscription_status', 'has_active_stories')
+
+    def get_profile_picture(self, obj):
+
+        if obj.profile_picture:
+            return obj.profile_picture.name
+        return None
 
     def get_subscription_status(self, obj):
-        try:
-            from apps.subscriptions.serializers import UserSubscriptionSerializer
-            return UserSubscriptionSerializer(obj.subscription).data
-        except:
+        request = self.context.get('request')
+        if not request or not request.user.is_authenticated:
             return None
+
+        # Check bidirectional: 
+        # 1. Is viewer subscribed to the profile OWNER (obj)?
+        subscription = UserSubscription.objects.filter(
+            subscriber=request.user,
+            subscribed_to=obj,
+            is_active=True
+        ).first()
+
+        # 2. Is profile OWNER (obj) subscribed to viewer?
+        if not subscription:
+            subscription = UserSubscription.objects.filter(
+                subscriber=obj,
+                subscribed_to=request.user,
+                is_active=True
+            ).first()
+
+        if subscription:
+            return UserSubscriptionSerializer(subscription).data
+        return None
 
     def get_is_following(self, obj):
         request = self.context.get('request')
@@ -28,6 +57,10 @@ class DetailedUserSerializer(serializers.ModelSerializer):
             from apps.videos.models import Follower
             return Follower.objects.filter(user_id=request.user, follower_user_id=obj).exists()
         return False
+
+    def get_subscribers_count(self, obj):
+        from apps.subscriptions.models import UserSubscription
+        return UserSubscription.objects.filter(subscribed_to=obj, is_active=True).count()
 
     def get_like_all_count(self, obj):
         return obj.all_likes()
@@ -48,6 +81,13 @@ class DetailedUserSerializer(serializers.ModelSerializer):
     
     def get_followed_all_acount(self, obj):
         return obj.all_followed().count()
+
+    def get_has_active_stories(self, obj):
+        from apps.videos.models import Story
+        from django.utils import timezone
+        from datetime import timedelta
+        limit = timezone.now() - timedelta(hours=24)
+        return Story.objects.filter(user=obj, is_active=True, created_at__gte=limit).exists()
     
 class LoginZerializer(serializers.Serializer):
     username = serializers.CharField()

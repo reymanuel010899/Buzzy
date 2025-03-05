@@ -1,7 +1,9 @@
+import random
 from re import L
 from django.shortcuts import get_object_or_404
 import requests
 from django.conf import settings
+from apps.subscriptions.models import UserSubscription
 from django.utils import timezone
 from datetime import timedelta
 from rest_framework.response import Response
@@ -11,11 +13,29 @@ from rest_framework.generics import ListAPIView
 from rest_framework.permissions import IsAuthenticated
 from django.db.models import Q, Exists, OuterRef
 # from apps.wallet.models import WalletModel
-from .models import ChatRoom, Comment, Follower, GiftStory, Like, Message, MessageReaction, Story, StoryGift, StoryLike, StoryMedia, StoryView, UserOnlineStatus, Video, View, User
-from .serializers import ChatRoomSerializer, CommentSerializers, FollowerSerializer, GetGiftStorySerializer, GiftRecivedSerializer, GiftStorySerializer, LikeSerializers, ListCommentsZerializers, MessageSerializer, StoryLikeSerializer, StorySerializer, StoryViewSerializer, UserSerializers, VideoZerializer, ViewSerializers, formated_created
+from .models import ChatRoom, Comment, Follower, GiftStory, Like, Message, MessageReaction, Story, StoryGift, StoryLike, StoryMedia, StoryView, UserOnlineStatus, Video, VideoGift, VideoStats, View, User
+from .serializers import ChatRoomSerializer,FollowerListSerializer, CommentSerializers, FollowerSerializer, GetGiftStorySerializer, GiftRecivedSerializer, GiftStorySerializer, LikeSerializers, ListCommentsZerializers, MessageSerializer, StoryLikeSerializer, StorySerializer, StoryViewSerializer, UserSerializers, VideoZerializer, ViewSerializers, formated_created
 from apps.wallet.models import WalletModel
 from apps.wallet.serializers import WalletSerializer
+from django.core.cache import cache
+from collections import Counter
+from django.db.models import F, ExpressionWrapper, FloatField, Case, When, Value
+from django.db.models.functions import Extract
 
+
+class UpdateDeviceTokenView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        token = request.data.get('device_token')
+        if not token:
+            return Response({'error': 'device_token results is required'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        status_obj, created = UserOnlineStatus.objects.get_or_create(user=request.user)
+        status_obj.device_token = token
+        status_obj.save()
+        
+        return Response({'message': 'Token updated successfully'})
 
 # Create your views here.
 FASTAPI_WS_URL = "http://localhost:8001"
@@ -63,25 +83,123 @@ class CreateViewApiView(APIView):
             )
 
 
+class VideoEventView(APIView):
+    """
+    Tracks multi-stage video engagement events.
+    Accepted event_types: video_start | video_engagement | video_view_valid
+
+    For video_view_valid: creates a View record (triggering the WS notification)
+    and increments VideoStats.valid_views atomically. A 60-minute cooldown
+    prevents the same user from inflating the counter via rapid replays.
+    """
+    permission_classes = [IsAuthenticated]
+
+    VALID_EVENTS = {'video_start', 'video_engagement', 'video_view_valid'}
+    COUNTER_MAP = {
+        'video_start': 'starts',
+        'video_engagement': 'engagements',
+        'video_view_valid': 'valid_views',
+    }
+
+    def post(self, request, *args, **kwargs):
+        video_id = request.data.get('video_id')
+        event_type = request.data.get('event_type')
+
+        if not video_id or event_type not in self.VALID_EVENTS:
+            return Response(
+                {'error': 'video_id y event_type válido son requeridos.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            video = Video.objects.get(id=video_id)
+        except Video.DoesNotExist:
+            return Response({'error': 'Video no encontrado.'}, status=status.HTTP_404_NOT_FOUND)
+
+        # --- Deduplication for valid views (60-minute cooldown) ---
+        if event_type == 'video_view_valid':
+            cutoff = timezone.now() - timedelta(hours=1)
+            already_viewed = View.objects.filter(
+                user_id=request.user,
+                video_id=video,
+                created_at__gte=cutoff
+            ).exists()
+
+            if already_viewed:
+                return Response(
+                    {'message': 'Vista válida ya registrada en la última hora.'},
+                    status=status.HTTP_200_OK
+                )
+
+            # Create the View record (triggers WS notification via existing logic)
+            view_obj, created = View.objects.get_or_create(
+                user_id=request.user,
+                video_id=video
+            )
+
+            if created:
+                ws_data = {
+                    'event': 'new_view',
+                    'video_id': video.id,
+                    'view_acount': video.get_count_view(),
+                    'user_id': request.user.id,
+                    'video_user_id': video.user_id.id,
+                }
+                try:
+                    requests.post(f"{settings.FASTAPI_WS_URL}/create-view/", json=ws_data, timeout=2)
+                except Exception as e:
+                    print('Error enviando evento WS (VideoEventView):', e)
+
+        # --- Atomically increment the matching counter in VideoStats ---
+        counter_field = self.COUNTER_MAP[event_type]
+        stats, _ = VideoStats.objects.get_or_create(video=video)
+        VideoStats.objects.filter(pk=stats.pk).update(
+            **{counter_field: F(counter_field) + 1}
+        )
+
+        return Response({'message': f'Evento {event_type} registrado.'}, status=status.HTTP_200_OK)
+
+
 class CreateCommentApiView(APIView):
     permission_classes = [IsAuthenticated]
     serializer_class = CommentSerializers
 
     def post(self, request, *args, **kwargs):
-        # Check subscription limits
+        video_id = request.data.get("video_id")
+        if not video_id:
+            return Response({"error": "video_id is required"}, status=status.HTTP_400_BAD_REQUEST)
+        
+        video = get_object_or_404(Video, id=video_id)
+        video_owner = video.user_id
+        
+        # Check subscription limits for this relationship
+        subscription = None
+        priority_comment_enabled = False
+        priority_plan_name = None
         try:
-            subscription = request.user.subscription
+            subscription = UserSubscription.objects.get(
+                subscriber=request.user, 
+                subscribed_to=video_owner,
+                is_active=True
+            )
             can_comment, message = subscription.can_post_comment()
-            if not can_comment:
-                return Response({"error": message}, status=status.HTTP_403_FORBIDDEN)
-        except Exception:
-            # User doesn't have a subscription record yet (should be rare due to signals)
+            if can_comment:
+                priority_comment_enabled = True
+                priority_plan_name = subscription.plan.name if subscription.plan else None
+        except UserSubscription.DoesNotExist:
+            # If no 1-to-1 subscription exists, handle based on business rules
+            # For now, we'll allow it if they are the owner, otherwise we follow existing logic
+            if video_owner != request.user:
+                # If you want to enforce subscription for comments, do it here.
+                # For now, we'll keep it permissive if no record exists, matching previous behavior
+                pass
+        except Exception as e:
+            print(f"Error checking comment subscription: {e}")
             pass
 
         validate_data = self.serializer_class(data=request.data)
 
         if validate_data.is_valid():
-
             # Obtener parent si viene
             parent_uuid = request.data.get("parent_uuid", None)
             parent = None
@@ -93,20 +211,18 @@ class CreateCommentApiView(APIView):
                     parent = None
 
             # Crear el comentario
-           
-            comment = validate_data.save(user_id=request.user)
+            comment = validate_data.save(
+                user_id=request.user,
+                is_priority_comment=priority_comment_enabled,
+                priority_plan_name=priority_plan_name
+            )
             if comment and parent:
                 comment.parent = parent
                 comment.save()
 
-            # Increment comment count for VIPs
-            try:
-                subscription = request.user.subscription
-                if subscription.plan and subscription.plan.name == 'VIP':
-                    subscription.comments_this_month += 1
-                    subscription.save()
-            except Exception:
-                pass
+            if subscription and priority_comment_enabled:
+                subscription.comments_this_month += 1
+                subscription.save()
 
             ws_data = {
                 "event": "new_comment",
@@ -117,7 +233,9 @@ class CreateCommentApiView(APIView):
                 "created_at": str(comment.created_at),
                 "uuid": str(comment.uuid),
                 "parent": self.serializer_class(comment.parent).data,
-                "comments_count": comment.video_id.get_count_comment()
+                "comments_count": comment.video_id.get_count_comment(),
+                "is_priority_comment": comment.is_priority_comment,
+                "priority_plan_name": comment.priority_plan_name,
             }
 
             try:
@@ -125,8 +243,10 @@ class CreateCommentApiView(APIView):
             except Exception as e:
                 print("Error enviando evento WS:", e)
 
+            response_serializer = self.serializer_class(comment, context={"request": request})
+
             return Response(
-                {"message": "Comentario creado correctamente", "data": validate_data.data},
+                {"message": "Comentario creado correctamente", "data": response_serializer.data},
                 status=status.HTTP_201_CREATED
             )
 
@@ -259,6 +379,36 @@ class CreateFollowerApiView(APIView):
             status=status.HTTP_400_BAD_REQUEST
         )
     
+
+class FollowersListView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, username):
+        target_user = get_object_or_404(User, username=username)
+        # People who follow target_user: follower_user_id = target_user
+        followers = Follower.objects.filter(follower_user_id=target_user).select_related('user_id')
+        
+        serializer = FollowerListSerializer(
+            followers, 
+            many=True, 
+            context={'request': request, 'view_target_user': target_user}
+        )
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+class FollowingListView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, username):
+        target_user = get_object_or_404(User, username=username)
+        # People target_user follows: user_id = target_user
+        following = Follower.objects.filter(user_id=target_user).select_related('follower_user_id')
+        
+        serializer = FollowerListSerializer(
+            following, 
+            many=True, 
+            context={'request': request, 'view_target_user': target_user}
+        )
+        return Response(serializer.data, status=status.HTTP_200_OK)
 
 class CreateStoryApiView(APIView):
     permission_classes = [IsAuthenticated]
@@ -513,7 +663,9 @@ class CreateGiftStoryView(APIView):
             gift_type = "fuego"
         elif gift_type ==  "🪙":
             gift_type = "bitcoin"
-
+        elif gift_type == "🪐":
+            gift_type =  "Space"
+ 
         try:
             gift_obj = GiftStory.objects.get(slug=gift_type, is_active=True)
         except GiftStory.DoesNotExist:
@@ -531,7 +683,7 @@ class CreateGiftStoryView(APIView):
             wallet = WalletModel.objects.get(user=request.user)
         except WalletModel.DoesNotExist:
             return Response({"error": "No tienes una wallet configurada"}, status=400)
-
+        print(wallet.tokens, "-2-", gift_obj.token_price)
         if wallet.tokens < gift_obj.token_price:
             return Response(
                 {"error": "Tokens insuficientes para enviar este regalo", "insufficient_tokens": True},
@@ -579,6 +731,109 @@ class CreateGiftStoryView(APIView):
                     "story": str(story_media.story.uuid),
                     "from": request.user.username,
                     "to": story_media.story.user.username,
+                },
+                "wallet": WalletSerializer(wallet).data
+            },
+            status=201
+        )
+
+
+class CreateGiftVideoView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, *args, **kwargs):
+        video_id = request.data.get("video_id")
+        gift_type = request.data.get("gift_type")
+
+        if not video_id or not gift_type:
+            return Response(
+                {"error": "video_id y gift_type son requeridos"},
+                status=400
+            )
+
+        # 1. Obtener el video
+        try:
+            video = Video.objects.select_related("user_id").get(id=video_id)
+        except Video.DoesNotExist:
+            return Response({"error": "Video no encontrado"}, status=404)
+
+        # 2. Normalizar emoji a slug
+        emoji_to_slug = {
+            "🦁": "leon",
+            "❤️": "te-amo",
+            "💕": "te-amo",
+            "🔥": "fuego",
+            "🪙": "bitcoin",
+            "🪐": "Space"
+        }
+        gift_typ = emoji_to_slug.get(gift_type, gift_type)
+
+        try:
+            gift_obj = GiftStory.objects.get(slug=gift_typ, is_active=True)
+        except GiftStory.DoesNotExist:
+            return Response({"error": "Este regalo no existe"}, status=404)
+
+        # No enviar regalo a tu propio video
+        if video.user_id == request.user:
+            return Response(
+                {"error": "No puedes enviarte regalos a tu propio video"},
+                status=400
+            )
+
+        # 3. Validar y descontar tokens
+        try:
+            wallet = WalletModel.objects.get(user=request.user)
+        except WalletModel.DoesNotExist:
+            return Response({"error": "No tienes una wallet configurada"}, status=400)
+
+        print(wallet.tokens, "-1-", gift_obj.token_price)
+        if wallet.tokens < gift_obj.token_price:
+            return Response(
+                {"error": "Tokens insuficientes para enviar este regalo", "insufficient_tokens": True},
+                status=400
+            )
+
+        wallet.tokens -= int(gift_obj.token_price)
+        wallet.save()
+
+        gift = VideoGift.objects.create(
+            user=video.user_id,
+            sender=request.user,
+            video=video,
+            gift=gift_obj,
+            gift_type=gift_type
+        )
+
+        # 4. WebSocket notification
+        ws_data = {
+            "event": "video_gift_received",
+            "video_id": video.id,
+            "gift_uuid": gift.uuid,
+            "gift_type": gift_type,
+            "amount": gift_obj.token_price,
+            "sender": gift.sender.username,
+            "gift_video": gift_obj.video.url if gift_obj.video else None,
+            "from_user": request.user.id,
+            "to_user": video.user_id.id,
+            "total_gifts": video.received_gifts.count(),
+            "color_premiun": gift_obj.color_premiun if gift_obj.color_premiun else "blue"
+        }
+
+        try:
+            import requests as http_requests
+            http_requests.post(f"{settings.FASTAPI_WS_URL}/broadcast-story/", json=ws_data, timeout=2)
+        except Exception:
+            pass
+
+        return Response(
+            {
+                "message": "Regalo enviado correctamente",
+                "gift": {
+                    "id": gift.id,
+                    "gift_type": gift.gift_type,
+                    "video": video.id,
+                    "from": request.user.username,
+                    "to": video.user_id.username,
                 },
                 "wallet": WalletSerializer(wallet).data
             },
@@ -829,6 +1084,7 @@ class UpdateOnlineStatusView(APIView):
     def post(self, request):
         user_id = request.data.get("user_id")
         is_online = request.data.get("is_online", False)
+        device_token = request.data.get("device_token")
 
         if not user_id:
             return Response({"error": "user_id requerido"}, status=400)
@@ -840,6 +1096,8 @@ class UpdateOnlineStatusView(APIView):
                 defaults={'is_online': False}
             )
             status.is_online = is_online
+            if device_token:
+                status.device_token = device_token
             if not is_online:
                 status.last_seen = timezone.now()
             status.save()
@@ -899,3 +1157,150 @@ class SaveMessageReactionView(APIView):
             return Response({"action": "removed", "username": user.username}, status=200)
 
         return Response({"action": "added", "username": user.username}, status=201)
+
+class UserSuggestionsView(APIView):
+    """
+    Algoritmo de Sugerencias de Usuarios (Recomendación)
+    Prioridades:
+    1. Cierre Triádico: Personas que sigue el dueño del perfil pero tú no.
+    2. Amigos en común: Personas con más conexiones mutuas contigo.
+    3. Intereses: Personas con categorías de contenido similares.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, username):
+        viewer = request.user
+        target_user = get_object_or_404(User, username=username)
+
+        # Cache key based on viewer and target
+        cache_key = f"user_suggestions_{viewer.id}_{target_user.id}"
+        cached_suggestions = cache.get(cache_key)
+        if cached_suggestions:
+            return Response(cached_suggestions, status=status.HTTP_200_OK)
+
+        # Data sets for logic
+        # viewer_following: IDs of people 'viewer' follows
+        viewer_following = set(Follower.objects.filter(user_id=viewer).values_list('follower_user_id', flat=True))
+        
+        # 1. Triadic Closure (Priority 1: +20 pts)
+        # People target_user follows but viewer doesn't
+        target_following = Follower.objects.filter(user_id=target_user).values_list('follower_user_id', flat=True)
+        
+        scores = Counter()
+        for uid in target_following:
+            if uid != viewer.id and uid not in viewer_following:
+                scores[uid] += 20
+
+        # 2. Common Friends / Mutuals (Priority 2: +5 pts per mutual)
+        # People who follow someone 'viewer' also follows
+        # This is a bit heavy, limiting depth
+        mutuals = Follower.objects.filter(
+            user_id__in=viewer_following
+        ).values_list('follower_user_id', flat=True)
+        
+        for uid in mutuals:
+            if uid != viewer.id and uid not in viewer_following:
+                scores[uid] += 5
+
+        # 3. Shared Interests (+10 pts)
+        # Match categories from viewer's liked videos
+        viewer_liked_categories = Video.objects.filter(
+            like_video_reverce__user_id=viewer
+        ).values_list('category_id', flat=True).distinct()
+        
+        if viewer_liked_categories:
+            users_in_categories = Video.objects.filter(
+                category_id__in=viewer_liked_categories
+            ).values_list('user_id', flat=True).distinct()
+            
+            for uid in users_in_categories:
+                if uid != viewer.id and uid not in viewer_following:
+                    scores[uid] += 10
+
+        # Get top 20 suggested user IDs
+        top_uids = [uid for uid, score in scores.most_common(20)]
+        
+        suggested_users = User.objects.filter(id__in=top_uids)
+        
+        # Format results using FollowerListSerializer (reusing for structure)
+        # We wrap in a list of {"user": user_data, "is_following": False}
+        results = []
+        for user in suggested_users:
+            results.append({
+                "user": UserSerializers(user, context={'request': request}).data,
+                "is_following": False, # By definition of our filtering
+                "score": scores[user.id]
+            })
+
+        # Sort results by score just in case QuerySet order changed
+        results.sort(key=lambda x: x['score'], reverse=True)
+
+        # Cache for 10 minutes
+        cache.set(cache_key, results, 600)
+
+        return Response(results, status=status.HTTP_200_OK)
+
+class RecommendationFeedApiView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        user_interests = request.data.get("user_interests", {}) # {category_id: weight}
+        last_cursor = request.data.get("last_cursor")
+        limit = request.data.get("limit", 10)
+
+        # 1. Base query: Videos not seen by user
+        seen_videos = View.objects.filter(user_id=request.user).values_list('video_id', flat=True)
+        queryset = Video.objects.exclude(id__in=seen_videos)
+
+        if last_cursor:
+            queryset = queryset.filter(created_at__lt=last_cursor)
+
+        # 2. Scoring Logic
+        seven_days_ago = timezone.now() - timedelta(days=7)
+        now_epoch = timezone.now().timestamp()
+        
+        interest_cases = [
+            When(category_id=cat_id, then=Value(float(weight)))
+            for cat_id, weight in user_interests.items()
+            if weight > 0
+        ]
+        
+        if not interest_cases:
+            interest_score_expr = Value(0.0)
+        else:
+            interest_score_expr = Case(*interest_cases, default=Value(0.0), output_field=FloatField())
+
+        videos = queryset.annotate(
+            interest_match=interest_score_expr,
+            recency=ExpressionWrapper(
+                (Extract(F('created_at'), 'epoch') - seven_days_ago.timestamp()) / (max(now_epoch - seven_days_ago.timestamp(), 1)),
+                output_field=FloatField()
+            )
+        ).annotate(
+            final_score=ExpressionWrapper(
+                (F('recency') * 0.3) + (F('interest_match') * 0.7),
+                output_field=FloatField()
+            )
+        ).order_by('-final_score')[:limit * 2]
+
+        video_list = list(videos)
+        if not video_list:
+            return Response([], status=status.HTTP_200_OK)
+
+        # 70/30 exploitation/exploration
+        exploitation_count = int(limit * 0.7)
+        exploration_count = limit - exploitation_count
+
+        top_candidates = video_list[:exploitation_count]
+        remaining_candidates = video_list[exploitation_count:]
+
+        if len(remaining_candidates) > exploration_count:
+            exploration_candidates = random.sample(remaining_candidates, exploration_count)
+        else:
+            exploration_candidates = remaining_candidates
+
+        final_selection = top_candidates + exploration_candidates
+        random.shuffle(final_selection)
+
+        serializer = VideoZerializer(final_selection, many=True, context={'request': request})
+        return Response(serializer.data, status=status.HTTP_200_OK)

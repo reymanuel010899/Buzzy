@@ -1,7 +1,8 @@
-from django.utils import timezone
-from datetime import datetime
 import uuid
 import secrets
+from datetime import datetime, timedelta
+from django.utils import timezone
+from .utils import generate_reset_code, send_recovery_email
 import requests as http_requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -18,6 +19,7 @@ from apps.videos.models import Video
 from .models import Availability, User, SocialAccount
 from .serializers import DetailedUserSerializer, SocialAccountSerializer
 from apps.videos.models import ChatRoom
+from apps.subscriptions.models import UserSubscription
 class LoginView(APIView):
     def post(self, request):
         email = request.data.get('email')
@@ -54,13 +56,130 @@ class LogoutView(APIView):
             return Response({"error": "Token inválido o expirado"}, status=status.HTTP_400_BAD_REQUEST)
         
 
+class GoogleLoginView(APIView):
+    def post(self, request):
+        access_token = request.data.get('access_token')
+        photo_url = request.data.get('photo_url')  # Optional Google avatar URL
+        if not access_token:
+            return Response({"error": "No token provided"}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            google_response = http_requests.get(
+                f"https://www.googleapis.com/oauth2/v3/userinfo?access_token={access_token}"
+            )
+            if not google_response.ok:
+                return Response({"error": "Invalid token"}, status=status.HTTP_400_BAD_REQUEST)
+                
+            user_info = google_response.json()
+            email = user_info.get("email")
+            first_name = user_info.get("given_name", "")
+            last_name = user_info.get("family_name", "")
+            
+            # Get real client IP
+            x_forwarded_for = request.META.get('HTTP_X_FORWARDED_FOR')
+            if x_forwarded_for:
+                ip = x_forwarded_for.split(',')[0].strip()
+            else:
+                ip = request.META.get('REMOTE_ADDR')
+
+            # Extract country from Google's 'locale' property as fallback
+            locale = user_info.get("locale", "")
+            country_code = "US"
+            if "-" in locale:
+                country_code = locale.split("-")[1].upper()
+            elif "_" in locale:
+                country_code = locale.split("_")[1].upper()
+
+            # Attempt to get precise country from IP API (overrides generic Google locale)
+            try:
+                import requests
+                # If local development, force "DO" for the user testing from Dominican Republic
+                if ip and (ip.startswith("127.") or ip.startswith("192.168")):
+                    country_code = "DO"
+                else:
+                    ip_response = requests.get(f"https://ipapi.co/{ip}/json/", timeout=5)
+                    if ip_response.ok:
+                        ip_data = ip_response.json()
+                        if ip_data.get("country_code"):
+                            country_code = ip_data.get("country_code").upper()
+            except Exception as e:
+                print("Error getting real IP country:", e)
+                
+            # Use photo_url from frontend (already extracted from Firebase result.user.photoURL)
+            # Fallback to Google userinfo picture field
+            profile_pic_url = photo_url or user_info.get("picture")
+            
+            # Find or create user
+            user = User.objects.filter(email=email).first()
+            is_new_user = False
+            if not user:
+                is_new_user = True
+                base_username = email.split('@')[0]
+                username = f"{base_username}_{secrets.token_hex(4)}"
+                user = User.objects.create_user(
+                    username=username,
+                    email=email,
+                    first_name=first_name,
+                    last_name=last_name,
+                    password=secrets.token_urlsafe(16)
+                )
+                
+                # Assign Country from Google's locale
+                from apps.users.models import Country
+                country_obj, _ = Country.objects.get_or_create(code=country_code, defaults={'name': country_code})
+                user.country = country_obj
+                user.save()
+
+
+            elif not user.country:
+                # If existing user somehow has no country, try to assign one
+                from apps.users.models import Country
+                country_obj, _ = Country.objects.get_or_create(code=country_code, defaults={'name': country_code})
+                user.country = country_obj
+                user.save()
+
+            # Save Google photo if user has no profile picture (new user or existing without photo)
+            if profile_pic_url and not user.profile_picture:
+                try:
+                    from urllib.request import urlopen
+                    from django.core.files.base import ContentFile
+                    import os
+                    img_response = urlopen(profile_pic_url)
+                    img_data = img_response.read()
+                    filename = f"google_{user.id}_{secrets.token_hex(4)}.jpg"
+                    user.profile_picture.save(filename, ContentFile(img_data), save=True)
+                except Exception as photo_err:
+                    print(f"Could not save Google photo: {photo_err}")
+
+            refresh = RefreshToken.for_user(user)
+            return Response({
+                "refresh": str(refresh),
+                "access": str(refresh.access_token),
+                "user": {
+                    "id": user.id,
+                    "username": user.username,
+                    "email": user.email,
+                    "profile_picture": user.profile_picture.url if user.profile_picture else (profile_pic_url or 'http://localhost:8000/media/profile_pics/avatar.webp'),
+                    "country": getattr(user.country, 'code', None)
+                }
+            }, status=status.HTTP_200_OK)
+        except Exception as e:
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+
+
 class RegisterView(APIView):
     def post(self, request):
+
         name = request.data.get('name')
         username = request.data.get('username')
         email = request.data.get('email')
         password = request.data.get('password')
         confirm_password = request.data.get('repeat_password')
+        country_name = request.data.get('country')
+        country_code = request.data.get('country_code', 'US')
+        phone_number = request.data.get('phone_number')
+
         # Validar que las contraseñas coincidan
         if password != confirm_password:
             return Response({
@@ -81,14 +200,18 @@ class RegisterView(APIView):
 
         # Crear el usuario
         user = User.objects.create_user(email=email, username=username, password=password,  first_name=name)
-        if user:
-            country_code = user.country.code if user.country else ""
-            WalletModel.objects.create(
-                balance=0,
-                user=user,
-                pass_code=f"{country_code}{str(uuid.uuid4())[:8]}".upper(),
-                wallet_type='main'
-            )
+        
+        if phone_number:
+            user.phone_number = phone_number
+            user.is_phone_verified = True  # Valido por Firebase antes de llamar a esta API
+            
+        if country_name:
+            from apps.users.models import Country
+            country_obj, _ = Country.objects.get_or_create(code=country_code, defaults={'name': country_name})
+            user.country = country_obj
+            
+        user.save()
+
         # Generar tokens
         refresh = RefreshToken.for_user(user)
 
@@ -118,7 +241,6 @@ class DetaildUser(APIView):
             participant2=request.user
         )
 
-        print(chat_room, "**")
 
         user_data = serialised_user.data
         user_data["chat_uuid"] = chat_room[0].uuid if chat_room.exists() else ""
@@ -582,60 +704,55 @@ class UserAvailabilityStatusView(APIView):
             target_user = User.objects.get(username=username)
             requesting_user = request.user
             
-            # 1. Check if target_user is available NOW
-            now = timezone.localtime()
-            current_day = now.weekday()  # 0=Monday, ..., 6=Sunday
-            current_time = now.time()
+            # 1. Check if target_user is available NOW using the same exact logic used everywhere else
+            is_available = target_user.is_currently_available()
             
-            is_available = Availability.objects.filter(
-                user=target_user,
-                day_of_week=current_day,
-                start_time__lte=current_time,
-                end_time__gte=current_time,
+            # 2. Check the active subscription between requester and target user
+            subscription = UserSubscription.objects.filter(
+                subscriber=requesting_user,
+                subscribed_to=target_user,
                 is_active=True
-            ).exists()
-            
-            # 2. Check requesting_user's subscription and limits
-            subscription = getattr(requesting_user, 'subscription', None)
+            ).select_related('plan').first()
             
             can_voice = False
             can_video = False
             remaining_calls = 0
+            remaining_video_calls = 0
+            remaining_voice_seconds = 0
+            remaining_video_seconds = 0
             plan_name = "NONE"
             upgrade_required = False
 
             if subscription and subscription.is_active and subscription.plan:
                 plan_name = subscription.plan.name
                 subscription.reset_if_new_month()
-                
-                limit = 0
-                if plan_name == 'PLUS':
-                    limit = 3
-                    can_voice = subscription.calls_this_month < limit
-                    can_video = False # Plus has no video
-                    remaining_calls = max(0, limit - subscription.calls_this_month)
-                    if remaining_calls == 0:
-                        upgrade_required = True
-                elif plan_name == 'FRIEND':
-                    limit = 5
-                    can_voice = subscription.calls_this_month < limit
-                    can_video = subscription.calls_this_month < limit
-                    remaining_calls = max(0, limit - subscription.calls_this_month)
-                    if remaining_calls == 0:
-                        upgrade_required = True
-                elif plan_name == 'VIP':
-                    # User requested VIP to be disabled
-                    can_voice = False
-                    can_video = False
-                    upgrade_required = False # Or maybe True if they need another plan? 
-                    # But VIP is usually top. I'll follow "VIP me lo deja siempre desabilitado".
-            
+                can_voice_by_limit, _ = subscription.can_make_call()
+                can_video_by_limit, _ = subscription.can_make_video_call()
+
+                voice_limit = subscription.get_benefit_limit('CALLS')
+                video_limit = subscription.get_benefit_limit('VIDEO CALLS')
+                remaining_voice_seconds = subscription.get_remaining_seconds('CALLS')
+                remaining_video_seconds = subscription.get_remaining_seconds('VIDEO CALLS')
+
+                can_voice = can_voice_by_limit
+                can_video = can_video_by_limit
+
+                if voice_limit > 0:
+                    remaining_calls = max(0, voice_limit - int(subscription.voice_seconds_this_month / 60))
+                if video_limit > 0:
+                    remaining_video_calls = max(0, video_limit - int(subscription.video_seconds_consumed_this_month / 60))
+
+                upgrade_required = not can_voice and not can_video
+
             return Response({
                 "username": username,
                 "is_available": is_available,
                 "can_voice": can_voice,
                 "can_video": can_video,
                 "remaining_calls": remaining_calls,
+                "remaining_video_calls": remaining_video_calls,
+                "remaining_voice_seconds": remaining_voice_seconds,
+                "remaining_video_seconds": remaining_video_seconds,
                 "plan_name": plan_name,
                 "upgrade_required": upgrade_required
             }, status=200)
@@ -644,3 +761,66 @@ class UserAvailabilityStatusView(APIView):
             return Response({"error": "Usuario no encontrado"}, status=404)
         except Exception as e:
             return Response({"error": str(e)}, status=500)
+class ForgotPasswordView(APIView):
+    def post(self, request):
+        email = request.data.get('email')
+        if not email:
+            return Response({"error": "El correo es requerido"}, status=400)
+        
+        try:
+            user = User.objects.get(email=email)
+            code = generate_reset_code()
+            user.reset_password_code = code
+            user.reset_password_expires = timezone.now() + timedelta(minutes=10)
+            user.save()
+            
+            if send_recovery_email(email, code):
+                return Response({"message": "Código de recuperación enviado"}, status=200)
+            else:
+                return Response({"error": "Error enviando el correo"}, status=500)
+        except User.DoesNotExist:
+            return Response({"error": "No existe un usuario con ese correo"}, status=404)
+
+class VerifyCodeView(APIView):
+    def post(self, request):
+        email = request.data.get('email')
+        code = request.data.get('code')
+        
+        if not email or not code:
+            return Response({"error": "Correo y código requeridos"}, status=400)
+        
+        try:
+            user = User.objects.get(email=email, reset_password_code=code)
+            if user.reset_password_expires < timezone.now():
+                return Response({"error": "El código ha expirado"}, status=400)
+            
+            return Response({"message": "Código verificado correctamente"}, status=200)
+        except User.DoesNotExist:
+            return Response({"error": "Código inválido"}, status=400)
+
+class PasswordResetView(APIView):
+    def post(self, request):
+        email = request.data.get('email')
+        code = request.data.get('code')
+        password = request.data.get('password')
+        confirm_password = request.data.get('confirm_password')
+        
+        if not all([email, code, password, confirm_password]):
+            return Response({"error": "Todos los campos son requeridos"}, status=400)
+        
+        if password != confirm_password:
+            return Response({"error": "Las contraseñas no coinciden"}, status=400)
+            
+        try:
+            user = User.objects.get(email=email, reset_password_code=code)
+            if user.reset_password_expires < timezone.now():
+                return Response({"error": "El código ha expirado"}, status=400)
+            
+            user.set_password(password)
+            user.reset_password_code = None
+            user.reset_password_expires = None
+            user.save()
+            
+            return Response({"message": "Contraseña actualizada correctamente"}, status=200)
+        except User.DoesNotExist:
+            return Response({"error": "Sesión de recuperación inválida"}, status=400)

@@ -314,6 +314,25 @@ class StoryGift(models.Model):
 
     def __str__(self):
         return f"{self.sender} sent {self.gift.name} to Story {self.story.user.username}"
+
+
+class VideoGift(models.Model):
+    uuid = models.CharField(max_length=32, default=full_uuid, unique=True, blank=True)
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='user_gift_video')
+    video = models.ForeignKey('Video', on_delete=models.CASCADE, related_name="received_gifts")
+    gift = models.ForeignKey(GiftStory, on_delete=models.CASCADE, related_name="video_sent_gifts")
+    gift_type = models.CharField(max_length=20)
+    sender = models.ForeignKey(User, on_delete=models.CASCADE, related_name="video_sent_gifts")
+    quantity = models.PositiveIntegerField(default=1)
+    created_at = models.DateTimeField(auto_now_add=True)
+    is_active = models.BooleanField(default=True)
+
+    def total_tokens(self):
+        return self.gift.token_price * self.quantity
+
+    def __str__(self):
+        return f"{self.sender} sent {self.gift.name} to Video {self.video.id}"
+
     
 
 class Video(models.Model):
@@ -325,6 +344,11 @@ class Video(models.Model):
     thumbnail_url = models.URLField()
     description = models.TextField(blank=True, null=True)
     tags = models.JSONField()
+    media_type = models.CharField(
+        max_length=10, 
+        choices=[('video', 'Video'), ('image', 'Imagen')], 
+        default='video'
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     duration = models.PositiveIntegerField()
@@ -348,6 +372,11 @@ class Video(models.Model):
 
 class Comment(models.Model):
     uuid = models.CharField(max_length=32, default=full_uuid, unique=True, null=True, blank=True)
+    PRIORITY_PLAN_CHOICES = [
+        ('VIP', 'VIP'),
+        ('PLUS', 'PLUS'),
+        ('FRIEND', 'FRIEND'),
+    ]
     parent = models.ForeignKey(
         "self",
         null=True,
@@ -359,6 +388,8 @@ class Comment(models.Model):
     video_id = models.ForeignKey(Video, on_delete=models.CASCADE, related_name='comernt_video_reverce')
     user_id = models.ForeignKey(User, on_delete=models.CASCADE)
     content = models.TextField()
+    is_priority_comment = models.BooleanField(default=False)
+    priority_plan_name = models.CharField(max_length=20, choices=PRIORITY_PLAN_CHOICES, null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
@@ -379,6 +410,24 @@ class View(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     def __str__(self):
         return f"View {self.id} - Video {self.video_id.id}"
+
+class VideoStats(models.Model):
+    """
+    Aggregate engagement counters per video.
+    All increments must use F() expressions to be atomic (race-condition safe).
+    """
+    video = models.OneToOneField(Video, on_delete=models.CASCADE, related_name='stats')
+    starts = models.PositiveIntegerField(default=0)        # video_start events
+    engagements = models.PositiveIntegerField(default=0)   # video_engagement events (3 s mark)
+    valid_views = models.PositiveIntegerField(default=0)   # video_view_valid events (30 % mark)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = 'Video Stats'
+        verbose_name_plural = 'Video Stats'
+
+    def __str__(self):
+        return f"Stats for Video {self.video_id}"
 
 class Follower(models.Model):
     user_id = models.ForeignKey(User, related_name='following', on_delete=models.CASCADE)
@@ -434,3 +483,57 @@ def create_chat_on_follow(sender, instance, created, **kwargs):
             'initiator': follower  # ← ¡Importante! El que sigue es el iniciador
         }
     )
+
+class AIStyle(models.Model):
+    name = models.CharField(max_length=100, unique=True)
+    slug = models.SlugField(unique=True)
+    description = models.TextField(blank=True, null=True)
+    icon_name = models.CharField(max_length=50, help_text="Nombre del icono en frontend, ej: ImageIcon")
+    color_bg = models.CharField(max_length=100, help_text="Clases CSS para el fondo, ej: bg-blue-500/20")
+    color_text = models.CharField(max_length=100, help_text="Clases CSS para el texto, ej: text-blue-400")
+    color_border = models.CharField(max_length=100, help_text="Clases CSS para el borde hover, ej: hover:border-blue-500/50")
+    is_active = models.BooleanField(default=True)
+    order = models.PositiveIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['order', 'name']
+        verbose_name = 'AI Style'
+        verbose_name_plural = 'AI Styles'
+
+    def __str__(self):
+        return self.name
+
+class AITemplate(models.Model):
+    style = models.ForeignKey(AIStyle, on_delete=models.CASCADE, related_name='templates')
+    title = models.CharField(max_length=100)
+    prompt = models.TextField()
+    image_url = models.URLField(help_text="URL de la imagen de ejemplo (thumbnail)", blank=True, null=True)
+    media_type = models.CharField(max_length=20, choices=[('image', 'Image'), ('video', 'Video')], default='image')
+    is_active = models.BooleanField(default=True)
+    order = models.PositiveIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['style', 'order']
+        verbose_name = 'AI Template'
+        verbose_name_plural = 'AI Templates'
+
+    def __str__(self):
+        return f"{self.title} ({self.style.name})"
+
+class AIGenerationHistory(models.Model):
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='ai_history')
+    prompt = models.TextField()
+    media_url = models.URLField(max_length=500)
+    media_type = models.CharField(max_length=20, choices=[('image', 'Image'), ('video', 'Video')], default='image')
+    style = models.ForeignKey(AIStyle, on_delete=models.SET_NULL, null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        verbose_name = 'AI Generation History'
+        verbose_name_plural = 'AI Generation Histories'
+
+    def __str__(self):
+        return f"{self.user.username} - {self.media_type} - {self.created_at}"

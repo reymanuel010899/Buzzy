@@ -9,6 +9,7 @@ urlpatterns = [
     path('api/token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),  
     path('api/register/', views.RegisterView.as_view(), name='register'),
     path('api/login/', views.LoginView.as_view(), name='login'),
+    path('api/google/login/', views.GoogleLoginView.as_view(), name='google-login'),
     path('api/logout/', views.LogoutView.as_view(), name='logout'),
     path('api/get-user/<str:username>/', views.DetaildUser.as_view(), name='get-user'),
     path('api/get-media-user/<str:username>/', views.MediaByUser.as_view(), name='get-media-user'),
@@ -21,4 +22,9 @@ urlpatterns = [
     path('api/social/disconnect/<str:platform>/', views.SocialAccountDisconnectView.as_view(), name='social-disconnect'),
     path('api/update-profile/', views.UpdateProfileView.as_view(), name='update-profile'),
     path('api/availability-status/<str:username>/', views.UserAvailabilityStatusView.as_view(), name='availability-status'),
+    
+    # Password Reset
+    path('api/auth/forgot-password/', views.ForgotPasswordView.as_view(), name='forgot-password'),
+    path('api/auth/verify-code/', views.VerifyCodeView.as_view(), name='verify-code'),
+    path('api/auth/reset-password/', views.PasswordResetView.as_view(), name='reset-password'),
 ]

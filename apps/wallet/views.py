@@ -7,13 +7,30 @@ from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
 from apps.wallet.serializers import TransactiosCreateSerializer, WalletSerializer
 from apps.wallet.models import WalletModel, TransactionModel
+from .models import BankAccount, TokenPackage, GlobalSettings
+from .serializers import BankAccountSerializer, TokenPackageSerializer
 
 stripe.api_key = settings.STRIPE_SECRET_KEY
 
 class GetWalletApiVIew(APIView):
     permission_classes = [IsAuthenticated]
     def get(self, request):
-        wallet = WalletModel.objects.get(user_id=request.user.id)
+        wallets = WalletModel.objects.filter(user_id=request.user.id).order_by('id')
+        if wallets.exists():
+            wallet = wallets.first()
+            # Limpiar si hay más de 1 billetera duplicada
+            if wallets.count() > 1:
+                # Borra todas las adicionales conservando la primera
+                WalletModel.objects.filter(id__in=[w.id for w in wallets[1:]]).delete()
+        else:
+            import uuid
+            country_code = request.user.country.code if hasattr(request.user, 'country') and request.user.country else "US"
+            wallet = WalletModel.objects.create(
+                user=request.user,
+                balance=0,
+                pass_code=f"{country_code}{str(uuid.uuid4())[:8]}".upper(),
+                wallet_type='main'
+            )
         serializer = WalletSerializer(wallet)
         return Response(serializer.data)
 
@@ -61,44 +78,131 @@ class CreateDepositSessionView(APIView):
         except Exception as e:
             return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
+class VerifyDepositSessionView(APIView):
+    def get(self, request, *args, **kwargs):
+        session_id = request.query_params.get('session_id')
+        if not session_id:
+            return Response({'error': 'Missing session_id'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            session = stripe.checkout.Session.retrieve(session_id)
+            
+            if session.payment_status == 'paid' or session.status == 'complete':
+                metadata = session.metadata
+                if metadata and metadata.get('type') == 'wallet_deposit':
+                    user_id = metadata.get('user_id')
+                    amount = float(metadata.get('amount', 0))
+                    
+                    if user_id and amount > 0:
+                        from django.contrib.auth import get_user_model
+                        from apps.wallet.models import WalletModel, TransactionModel
+                        from decimal import Decimal
+                        User = get_user_model()
+                        try:
+                            user = User.objects.get(id=user_id)
+                            wallet, _ = WalletModel.objects.get_or_create(user=user)
+                            
+                            # Check if transaction already exists for this session
+                            tx_exists = TransactionModel.objects.filter(payment_id=session.id).exists()
+                            if not tx_exists:
+                                # The 'update_wallet_balance' signal in apps/wallet/models.py 
+                                # will automatically add the amount to wallet.balance 
+                                # when this TransactionModel is created.
+                                
+                                # Record transaction
+                                TransactionModel.objects.create(
+                                    wallet=wallet,
+                                    transaction_type='deposit',
+                                    status='completed',
+                                    amount=Decimal(str(amount)),
+                                    description='Deposit via Stripe Checkout',
+                                    payment_id=session.id
+                                )
+                                print(f"Successfully processed deposit for user {user.username}: ${amount}")
+                        except Exception as e:
+                            print(f"Error processing deposit for {user_id}: {e}")
+                            return Response({'error': 'Failed to process deposit internally'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+            return Response({
+                'id': session.id,
+                'payment_status': session.payment_status,
+                'status': session.status,
+                'amount_total': session.amount_total / 100,
+                'currency': session.currency,
+                'metadata': session.metadata
+            })
+        except Exception as e:
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
 class WithdrawFundsView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, *args, **kwargs):
         amount = request.data.get('amount')
+        bank_account_id = request.data.get('bank_account_id')
+
         if not amount:
-            return Response({'error': 'Amount is required'}, status=status.HTTP_400_BAD_REQUEST)
-        
+            return Response({'error': 'Amount is required'}, status=400)
+
         try:
             amount = float(amount)
+
             if amount <= 0:
-                return Response({'error': 'Invalid amount'}, status=status.HTTP_400_BAD_REQUEST)
-            
+                return Response({'error': 'Invalid amount'}, status=400)
+
+            bank_account = BankAccount.objects.get(
+                id=bank_account_id,
+                user=request.user
+            )
+
             wallet = WalletModel.objects.get(user=request.user)
+
             if wallet.balance < amount:
-                return Response({'error': 'Insufficient funds'}, status=status.HTTP_400_BAD_REQUEST)
-            
-            # Create a PENDING withdrawal transaction
-            # Balance is NOT deducted yet by the signal because status is 'pending'
-            # However, for withdrawals, we might want to "lock" the balance or deduct it immediately
-            # Based on user request "que pueda retirar fondo de mi app", usually we deduct immediately to prevent double-spending
-            
-            # Let's deduct immediately for withdrawals to be safe
+                return Response(
+                    {'error': 'Saldo insuficiente'},
+                    status=400
+                )
+
             decimal_amount = Decimal(str(amount))
+
+            # Stripe amount en centavos
+            stripe_amount = int(amount * 100)
+            # Crear transferencia en Stripe
+            try:
+                transfer = stripe.Transfer.create(
+                    amount=stripe_amount,
+                    currency="usd",
+                    destination=bank_account.stripe_account_id,
+                    description=f"Withdrawal for {request.user.username}",
+                )
+            except Exception as e:
+                print(e, "=========")
+                error_message = str(e)
+                clean_message = error_message.split(": ", 1)[1].split(" See:")[0]
+                return Response({'active': False,  "charges_enabled": False, "payouts_enabled": False, "message": clean_message}, status=status.HTTP_200_OK)
+
+            # Descontar del wallet
             wallet.balance -= decimal_amount
             wallet.save()
 
-            TransactionModel.objects.create(
+            transaction = TransactionModel.objects.create(
                 wallet=wallet,
                 transaction_type='withdrawal',
-                status='pending',
-                amount=amount,
-                description=f"Solicitud de retiro de fondos"
+                status='completed',
+                amount=decimal_amount,
+                bank_account=bank_account,
+                payment_id=transfer.id,
+                description="Withdrawal via Stripe"
             )
 
-            return Response({'message': 'Solicitud de retiro enviada correctamente', 'balance': wallet.balance})
+            return Response({
+                "message": "Retiro enviado correctamente",
+                "stripe_transfer_id": transfer.id,
+                "balance": wallet.balance
+            })
+
         except Exception as e:
-            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({'error': str(e)}, status=400)
 
 class CreateTransationsApiView(APIView):
     serializer_class=TransactiosCreateSerializer
@@ -176,22 +280,36 @@ class BuyTokensApiView(APIView):
         }, status=status.HTTP_200_OK)
 
 
-from .models import BankAccount
-from .serializers import BankAccountSerializer
 
 class BankAccountListCreateView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        accounts = BankAccount.objects.filter(user=request.user)
-        serializer = BankAccountSerializer(accounts, many=True)
+        stripe_accounts = BankAccount.objects.filter(user=request.user)
+        for stripe_account in stripe_accounts:
+            account = stripe.Account.retrieve(stripe_account.stripe_account_id)
+            if account.details_submitted and account.payouts_enabled and stripe_account.is_active == False:
+                stripe_account.is_active = True
+                stripe_account.save()
+
+        serializer = BankAccountSerializer(stripe_accounts.filter(is_active=True), many=True)
         return Response(serializer.data)
 
     def post(self, request):
-        serializer = BankAccountSerializer(data=request.data, context={'request': request})
+
+        serializer = BankAccountSerializer(
+            data=request.data,
+            context={'request': request}
+        )
+
         if serializer.is_valid():
-            serializer.save(user=request.user)
-            return Response(serializer.data, status=status.HTTP_201_CREATED)
+            bank_account = serializer.save()
+
+            return Response({
+                "bank_account": BankAccountSerializer(bank_account).data,
+                "stripe_onboarding_url": getattr(bank_account, "onboarding_url", None)
+            }, status=status.HTTP_201_CREATED)
+
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 class BankAccountDeleteView(APIView):
@@ -220,3 +338,62 @@ class BankAccountDeleteView(APIView):
                 next_account.save()
                 
         return Response({'message': 'Cuenta bancaria eliminada correctamente'}, status=status.HTTP_200_OK)
+
+class TokenPackageListView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        packages = TokenPackage.objects.filter(is_active=True)
+        serializer = TokenPackageSerializer(packages, many=True)
+        return Response(serializer.data)
+
+
+class CalculateTokenPriceApiView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        tokens_str = request.query_params.get('tokens')
+        if not tokens_str:
+            return Response({'error': 'Cantidad de tokens requerida.'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            tokens_qty = int(tokens_str)
+            if tokens_qty <= 0:
+                raise ValueError
+        except ValueError:
+            return Response({'error': 'Cantidad inválida.'}, status=status.HTTP_400_BAD_REQUEST)
+            
+        settings = GlobalSettings.get_settings()
+        price_per_token = Decimal(str(settings.custom_token_price_usd))
+        total_price = Decimal(str(tokens_qty)) * price_per_token
+        
+        return Response({
+            'tokens': tokens_qty,
+            'price_per_token': price_per_token,
+            'total_price': round(total_price, 2)
+        }, status=status.HTTP_200_OK)
+
+class StripeAccountStatusView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        user = request.user
+        stripe_account = BankAccount.objects.filter(user=user, is_primary=True).first()
+        account = stripe.Account.retrieve(stripe_account.stripe_account_id)
+        # verificar si terminó onboarding
+        if account.details_submitted and account.payouts_enabled:
+
+            stripe_account.is_active = True
+            stripe_account.save()
+
+            return Response({
+                "active": True,
+                "charges_enabled": account.charges_enabled,
+                "payouts_enabled": account.payouts_enabled
+            })
+
+        return Response({
+            "active": False,
+            "charges_enabled": account.charges_enabled,
+            "payouts_enabled": account.payouts_enabled
+        })

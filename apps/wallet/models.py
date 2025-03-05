@@ -91,6 +91,9 @@ class TransactionModel(models.Model):
     amount = models.DecimalField(max_digits=12, decimal_places=2)
     description = models.TextField(blank=True, null=True)
     payment_id = models.CharField(max_length=255, blank=True, null=True) # Stripe Session or Payment ID
+    
+    # Optional link to bank account for withdrawals
+    bank_account = models.ForeignKey('BankAccount', on_delete=models.SET_NULL, null=True, blank=True, related_name='transactions')
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -106,15 +109,21 @@ class TransactionModel(models.Model):
 @receiver(post_save, sender=User)
 def create_user_wallet(sender, instance, created, **kwargs):
     if created:
+        import uuid
         # We ensure a default currency exists. Looking at CurrencyModel, 'USD' seems to be the default code.
         currency, _ = CurrencyModel.objects.get_or_create(
             code='USD',
             defaults={'name': 'US Dollar', 'symbol': '$', 'type': 'fiat'}
         )
+        
+        country_code = getattr(instance.country, 'code', '') if hasattr(instance, 'country') and instance.country else ""
+        pass_code = f"{country_code}{str(uuid.uuid4())[:8]}".upper()
+        
         WalletModel.objects.create(
             user=instance,
             balance=0.00,
             tokens=100,  # Initial token bonus for new users
+            pass_code=pass_code,
             currency=currency,
             wallet_type='main'
         )
@@ -138,8 +147,11 @@ class BankAccount(models.Model):
     encrypted_account_number = models.TextField()
     encrypted_routing_number = models.TextField(blank=True, null=True)
     
+    stripe_account_id = models.CharField(max_length=255, blank=True, null=True)
+
     # Metadata
     is_primary = models.BooleanField(default=False)
+    is_active = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -157,3 +169,41 @@ class BankAccount(models.Model):
         if len(raw) > 4:
             return f"****{raw[-4:]}"
         return "****"
+
+class TokenPackage(models.Model):
+    tokens = models.PositiveIntegerField()
+    price = models.DecimalField(max_digits=10, decimal_places=2)
+    is_active = models.BooleanField(default=True)
+    is_popular = models.BooleanField(default=False)
+    color_gradient = models.CharField(max_length=100, help_text="Tailwind gradient classes, e.g., 'from-blue-500 to-cyan-500'")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"{self.tokens} Tokens - ${self.price}"
+
+    class Meta:
+        verbose_name = 'Paquete de Tokens'
+        verbose_name_plural = 'Paquetes de Tokens'
+        ordering = ['tokens']
+
+class GlobalSettings(models.Model):
+    custom_token_price_usd = models.DecimalField(
+        max_digits=10, 
+        decimal_places=4, 
+        default=0.015,
+        help_text="Precio en USD por cada token en recargas personalizadas."
+    )
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"Configuración Global (Tokens: ${self.custom_token_price_usd})"
+
+    class Meta:
+        verbose_name = 'Configuración Global'
+        verbose_name_plural = 'Configuraciones Globales'
+
+    @classmethod
+    def get_settings(cls):
+        obj, created = cls.objects.get_or_create(id=1)
+        return obj

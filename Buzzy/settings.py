@@ -31,7 +31,7 @@ DEBUG = True
 
 # ALLOWED_HOSTS = []
 ALLOWED_HOSTS = [os.getenv('BACKEND_URL', '*'), 'localhost', '127.0.0.1', '*']
-APPEND_SLASH = False
+APPEND_SLASH = True
 
 
 # Application definition
@@ -57,6 +57,7 @@ LOCAL_APPS = [
     'apps.wallet',
     'apps.markerplace',
     'apps.subscriptions',
+    'apps.ads',
 ]
 
 INSTALLED_APPS  = DJANGO_APPS + TRHE_PARTY_APPS + LOCAL_APPS
@@ -111,11 +112,14 @@ WSGI_APPLICATION = 'Buzzy.wsgi.application'
 
 CORS_ALLOWED_ORIGINS = [
     "http://localhost:5173",
-    "http://10.0.0.41:5173"
+    "http://10.0.0.41:5173",
+     "http://localhost:5000"
 ]
 CSRF_TRUSTED_ORIGINS = [
     "http://localhost:5173",
+    "http://localhost:5000",
     "http://127.0.0.1:5173",
+    "http://127.0.0.1:5000"
 ]
 # Database
 # https://docs.djangoproject.com/en/4.2/ref/settings/#databases
@@ -178,7 +182,7 @@ SIMPLE_JWT = {
 
 LANGUAGE_CODE = 'en-us'
 
-TIME_ZONE = 'UTC'
+TIME_ZONE = 'America/Santo_Domingo'
 
 USE_I18N = True
 
@@ -195,6 +199,14 @@ STATICFILES_DIRS = [
 ]
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
+# Email Configuration
+EMAIL_BACKEND = os.getenv('EMAIL_BACKEND', 'django.core.mail.backends.smtp.EmailBackend')
+EMAIL_HOST = os.getenv('EMAIL_HOST', 'smtp.gmail.com')
+EMAIL_PORT = int(os.getenv('EMAIL_PORT', 587))
+EMAIL_USE_TLS = os.getenv('EMAIL_USE_TLS', 'True').lower() == 'true'
+EMAIL_HOST_USER = os.getenv('EMAIL_HOST_USER')
+EMAIL_HOST_PASSWORD = os.getenv('EMAIL_HOST_PASSWORD')
+DEFAULT_FROM_EMAIL = EMAIL_HOST_USER
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/4.2/ref/settings/#default-auto-field
@@ -208,7 +220,19 @@ CSRF_COOKIE_HTTPONLY = True
 
 
 FASTAPI_WS_URL = os.getenv("FASTAPI_WS_URL", "http://localhost:8001")
+SOCKET_URL = FASTAPI_WS_URL # Alias for internal broadcasts
 BACKEND_URL=os.getenv("BACKEND_URL", "http://localhost:8000")
+
+GOOGLE_API_KEY=os.getenv("GOOGLE_API_KEY", "")
+AGORA_APP_ID = os.getenv("AGORA_APP_ID", "")
+AGORA_APP_CERTIFICATE = os.getenv("AGORA_APP_CERTIFICATE", "")
+AGORA_CUSTOMER_ID = os.getenv("AGORA_CUSTOMER_ID", "")
+AGORA_CUSTOMER_SECRET = os.getenv("AGORA_CUSTOMER_SECRET", "")
+FIREBASE_SERVER_KEY = os.getenv("FIREBASE_SERVER_KEY", "")
+FIREBASE_SERVICE_ACCOUNT_PATH = os.getenv(
+    "FIREBASE_SERVICE_ACCOUNT_PATH",
+    str(BASE_DIR / "buzzy-app-8086f-firebase-adminsdk-fbsvc-2772bee6a1.json"),
+)
 
 #*********************** enable when i have domain *************************
 # SECURE_BROWSER_XSS_FILTER = True  # Enables XSS protection in browsers
