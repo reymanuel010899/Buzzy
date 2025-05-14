@@ -6,8 +6,8 @@ from django.conf.urls.static import serve
 urlpatterns = [
     path('admin/', admin.site.urls),
     path('', include('apps.users.urls', namespace='users')),
-    path('media/', include('apps.videos.urls', namespace='video')),
-    path('markerplace/', include('apps.markerplace.urls', namespace='markerplace')),
+    path('api/', include('apps.videos.urls', namespace='video')),
+    path('api/', include('apps.markerplace.urls', namespace='markerplace')),
 ]
 
 urlpatterns += [

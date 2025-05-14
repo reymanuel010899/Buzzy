@@ -14,6 +14,7 @@ class LoginView(APIView):
         email = request.data.get('email')
         password = request.data.get('password')
         user = User.objects.filter(email=email).first()
+
         if self.request.user and user.check_password(password):
             refresh = RefreshToken.for_user(user)
             return Response({
@@ -30,7 +31,7 @@ class LoginView(APIView):
             return Response({"error": "Credenciales inválidas"}, status=status.HTTP_401_UNAUTHORIZED)
    
 class LogoutView(APIView):
-    permission_classes = [IsAuthenticated]  # Solo usuarios autenticados pueden hacer logout
+    permission_classes = [IsAuthenticated]
 
     def post(self, request):
         try:

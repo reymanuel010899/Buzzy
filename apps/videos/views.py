@@ -53,10 +53,10 @@ class VideoUploadView(APIView):
 
             return Response(VideoSerializerMeta(video).data, status=status.HTTP_201_CREATED)
 
-        print("Errores del serializer:", serializer.errors)  # Log para depuración
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
     
 class ListMediaApiView(ListAPIView):
+    permission_classes = [IsAuthenticated]
     serializer_class = VideoZerializer
     def get_queryset(self):
         return Video.objects.all()
