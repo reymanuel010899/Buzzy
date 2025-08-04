@@ -25,7 +25,6 @@ class VideoUploadView(APIView):
             request_data['user_id'] = user.id
 
         serializer = VideoSerializerMeta(data=request_data)
-        print(request_data, "*********************")
         if serializer.is_valid():
             video_file = request.POST.get('video')
             if not video_file:
@@ -34,7 +33,6 @@ class VideoUploadView(APIView):
             # Generar un nombre único para el archivo
             file_extension = os.path.splitext(video_file)[1]
             file_name = f"{uuid.uuid4()}{file_extension}"
-            print(file_name, "-------------")
             file_path = default_storage.save(os.path.join('contenido', file_name), video_file)
 
             # Obtener la ruta completa del archivo
