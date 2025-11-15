@@ -35,14 +35,14 @@ class Category(models.Model):
 class Video(models.Model):
     user_id = models.ForeignKey(User, on_delete=models.CASCADE, related_name='user_reverce' )  # Referencia al usuario que sube el video
     category = models.ForeignKey(Category, on_delete=models.CASCADE, blank=True, null=True)
-    video_url = models.URLField()  # URL o ruta del archivo de video
+    video_url = models.URLField()
     video = models.FileField(upload_to='contenido/', blank=True, null=True)
-    thumbnail_url = models.URLField()  # URL o ruta de la miniatura del video
-    description = models.TextField()  # Descripción del video
-    tags = models.JSONField()  # Etiquetas asociadas al video (puede ser una lista)
-    created_at = models.DateTimeField(auto_now_add=True)  # Fecha de subida del video
-    updated_at = models.DateTimeField(auto_now=True)  # Fecha de la última modificación
-    duration = models.PositiveIntegerField()  # Duración del video en segundos
+    thumbnail_url = models.URLField()
+    description = models.TextField()
+    tags = models.JSONField()
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    duration = models.PositiveIntegerField() 
 
 
     def get_count_view(self):
