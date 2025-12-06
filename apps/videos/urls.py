@@ -13,7 +13,6 @@ urlpatterns = [
     # HISTORY
     path("api/stories/create/", views.CreateStoryApiView.as_view()),
     path("api/stories/like/", views.CreateStoryLikeView.as_view()),
-# ListGiftRecivedByUserApiView
     path("api/stories/send-story-gifted/", views.CreateGiftStoryView.as_view(), name="send-gift"),
     path("api/stories/gift/active/", views.ListGiftActiveApiView.as_view()),
     path("api/stories/gift/get-one/active/<int:gift_uuid>/<str:story_uuid>/", views.GetOneGiftActiveApiView.as_view()),
