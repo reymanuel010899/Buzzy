@@ -1,15 +1,16 @@
+import uuid
 from rest_framework.permissions import IsAuthenticated
-from rest_framework.authentication import TokenAuthentication
 from rest_framework.views import APIView
 from rest_framework.response import Response
+from apps.wallet.models import WalletModel
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework import status
 from apps.videos.serializers import  VideoZerializer
 from apps.videos.models import Video
 from .models import User
-from .serializers import LoginZerializer, DetailedUserSerializer
+from .serializers import DetailedUserSerializer
+
 class LoginView(APIView):
-    # authentication_class = (TokenAuthentication,)
     def post(self, request):
         email = request.data.get('email')
         password = request.data.get('password')
@@ -70,9 +71,17 @@ class RegisterView(APIView):
 
         # Crear el usuario
         user = User.objects.create_user(email=email, username=username, password=password,  first_name=name)
-
+        if user:
+            WalletModel.objects.create(
+                balance=0,
+                user=user,
+                pass_code=f"{user.country.code if user.country.code else '' }{str(uuid.uuid4())[:8]}".upper(),
+                wallet_type='main'
+            )
         # Generar tokens
         refresh = RefreshToken.for_user(user)
+
+        #create a wallet
 
         # Retornar los tokens y los datos del usuario
         return Response({
@@ -96,6 +105,7 @@ class DetaildUser(APIView):
             "user":  serialised_user.data,
         }, status=status.HTTP_200_OK)
     
+
 class MediaByUser(APIView):
     serializer_class =  VideoZerializer
     # authentication_classes = [TokenAuthentication]
@@ -104,7 +114,7 @@ class MediaByUser(APIView):
     def get(self, request, username):
         user = User.objects.get(username=username)
         media = Video.objects.filter(user_id=user)
-        serialised_user = self.serializer_class(media, many=True)
+        serialised_user = self.serializer_class(media, many=True, context={'request': request})
         return Response({
             "media_user":  serialised_user.data,
         }, status=status.HTTP_200_OK)

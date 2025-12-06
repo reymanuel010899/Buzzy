@@ -6,10 +6,11 @@ class DetailedUserSerializer(serializers.ModelSerializer):
     comments_all_count = serializers.SerializerMethodField(read_only=True)
     view_all_acount = serializers.SerializerMethodField(read_only=True)
     follower_all_acount = serializers.SerializerMethodField(read_only=True)
+    followed_all_acount = serializers.SerializerMethodField(read_only=True)
 
     class Meta:
         model = models.User
-        fields = ('id','first_name', 'email', 'profile_picture', 'like_all_count', 'comments_all_count', 'view_all_acount', 'follower_all_acount')
+        fields = ('id','first_name', 'email', 'profile_picture', 'like_all_count', 'comments_all_count', 'view_all_acount', 'follower_all_acount', 'followed_all_acount')
 
     def get_like_all_count(self, obj):
         return obj.all_likes()
@@ -21,7 +22,10 @@ class DetailedUserSerializer(serializers.ModelSerializer):
         return obj.all_views()
     
     def get_follower_all_acount(self, obj):
-        return obj.all_followers()
+        return obj.all_followers().count()
+    
+    def get_followed_all_acount(self, obj):
+        return obj.all_followed().count()
     
 class LoginZerializer(serializers.Serializer):
     username = serializers.CharField()

@@ -1,6 +1,16 @@
+from django.utils import timezone
+from datetime import timedelta
 from django.db import models
 from apps.users.models import User
 from django.utils.text import slugify
+import uuid
+
+def full_uuid():
+    return str(uuid.uuid4()).replace("-", "")
+
+def gift_upload_path(instance, filename):
+    # Ejemplo: gifts/rocket/rocket.mp4
+    return f"gifts/{instance.slug}/{filename}"
 
 class Category(models.Model):
     name = models.CharField(max_length=255, unique=True)
@@ -32,7 +42,115 @@ class Category(models.Model):
             models.Index(fields=['slug']),
         ]
 
+
+class Story(models.Model):
+    uuid = models.CharField(max_length=32, default=full_uuid, unique=True, blank=True)
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="stories")
+    
+    text = models.TextField(blank=True, null=True)  # texto opcional
+    is_active = models.BooleanField(default=True)   # si ya expiró
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def has_expired(self):
+        return timezone.now() > self.created_at + timedelta(hours=24)
+
+    def mark_expired(self):
+        if self.has_expired() and self.is_active:
+            self.is_active = False
+            self.save()
+
+    def total_views(self):
+        return self.story_views.count()
+
+    def __str__(self):
+        return f"Story {self.id} - User {self.user.username}"
+    
+
+class StoryMedia(models.Model):
+    uuid = models.CharField(max_length=32, default=full_uuid, unique=True, blank=True)
+    story = models.ForeignKey(Story, on_delete=models.CASCADE, related_name="media")
+    file = models.FileField(upload_to="stories/media/")  # Imagen o Video
+    type = models.CharField(max_length=20, choices=[
+        ("image", "Image"),
+        ("video", "Video"),
+    ])
+
+    order = models.PositiveIntegerField(default=0)
+
+    def __str__(self):
+        return f"Media {self.id} - Story {self.story.id}"
+
+class StoryView(models.Model):
+    story = models.ForeignKey(Story, on_delete=models.CASCADE, related_name="story_views")
+    user = models.ForeignKey(User, on_delete=models.CASCADE)
+    viewed_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ("story", "user")
+
+    def __str__(self):
+        return f"{self.user.username} viewed Story {self.story.id}"
+    
+class StoryLike(models.Model):
+    story = models.ForeignKey(Story, on_delete=models.CASCADE, related_name="story_likes")
+    user = models.ForeignKey(User, on_delete=models.CASCADE)
+    liked_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ("story", "user")
+
+    def __str__(self):
+        return f"{self.user.username} liked Story {self.story.id}"
+
+    @classmethod
+    def total_likes(cls, story):
+        return cls.objects.filter(story=story).count()
+
+    @classmethod
+    def is_liked(cls, story, user):
+        return cls.objects.filter(story=story, user=user).exists()
+
+    def unlike(self):
+        self.delete()
+
+class GiftStory(models.Model):
+    name = models.CharField(max_length=100) 
+    slug = models.SlugField(unique=True)     
+    emoji = models.CharField(max_length=100, blank=True, null=True)
+    color_premiun = models.CharField(max_length=100, blank=True, null=True)
+    video = models.FileField(
+        upload_to=gift_upload_path,
+        help_text="Video MP4 con fondo transparente si es posible"
+    )
+
+    token_price = models.PositiveIntegerField(default=1)
+    is_active = models.BooleanField(default=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return self.name
+          
+class StoryGift(models.Model):
+    uuid = models.CharField(max_length=32, default=full_uuid, unique=True, blank=True)
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='user_gift_story')
+    story = models.ForeignKey(Story, on_delete=models.CASCADE, related_name="received_gifts")
+    gift = models.ForeignKey(GiftStory, on_delete=models.CASCADE, related_name="sent_gifts")
+    gift_type = models.CharField(max_length=20)
+    sender = models.ForeignKey(User, on_delete=models.CASCADE, related_name="sent_gifts")
+    quantity = models.PositiveIntegerField(default=1)
+    created_at = models.DateTimeField(auto_now_add=True)
+    is_active = models.BooleanField(default=True)
+    
+    def total_tokens(self):
+        return self.gift.token_price * self.quantity
+
+    def __str__(self):
+        return f"{self.sender} sent {self.gift.name} to Story {self.story.user.username}"
+    
+
 class Video(models.Model):
+    uuid = models.CharField(max_length=32, default=full_uuid, unique=True, blank=True)
     user_id = models.ForeignKey(User, on_delete=models.CASCADE, related_name='user_reverce' )  # Referencia al usuario que sube el video
     category = models.ForeignKey(Category, on_delete=models.CASCADE, blank=True, null=True)
     video_url = models.URLField()
@@ -42,7 +160,7 @@ class Video(models.Model):
     tags = models.JSONField()
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
-    duration = models.PositiveIntegerField() 
+    duration = models.PositiveIntegerField()
 
 
     def get_count_view(self):
@@ -62,6 +180,7 @@ class Video(models.Model):
         verbose_name_plural = 'Videos'
 
 class Comment(models.Model):
+    uuid = models.CharField(max_length=32, default=full_uuid, unique=True, null=True, blank=True)
     video_id = models.ForeignKey(Video, on_delete=models.CASCADE, related_name='comernt_video_reverce')
     user_id = models.ForeignKey(User, on_delete=models.CASCADE)
     content = models.TextField()
@@ -71,6 +190,7 @@ class Comment(models.Model):
         return f"Comentario {self.id} - {self.content[:50]}"
 
 class Like(models.Model):
+    uuid = models.CharField(max_length=32, default=full_uuid, unique=True, null=True, blank=True)
     user_id = models.ForeignKey(User, on_delete=models.CASCADE) 
     video_id = models.ForeignKey(Video, on_delete=models.CASCADE, related_name='like_video_reverce')
     created_at = models.DateTimeField(auto_now_add=True) 
@@ -78,6 +198,7 @@ class Like(models.Model):
         return f"Like {self.id} - Video {self.video_id.id}"
     
 class View(models.Model):
+    uuid = models.CharField(max_length=32, default=full_uuid, unique=True, null=True, blank=True)
     user_id = models.ForeignKey(User, on_delete=models.CASCADE)
     video_id = models.ForeignKey(Video, on_delete=models.CASCADE, related_name='video_reverce')
     created_at = models.DateTimeField(auto_now_add=True)
@@ -90,8 +211,9 @@ class Follower(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
-        return f"Follower {self.id} - {self.user_id.username} follows {self.follower_user_id.username}"
+        return f"{self.user_id.username} follow to {self.follower_user_id.username}"
     
+
 class Notification(models.Model):
     user_id = models.ForeignKey(User, on_delete=models.CASCADE) 
     type = models.CharField(max_length=50) 
