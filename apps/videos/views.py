@@ -57,19 +57,40 @@ class CreateViewApiView(APIView):
 class CreateCommentApiView(APIView):
     permission_classes = [IsAuthenticated]
     serializer_class = CommentSerializers
+
     def post(self, request, *args, **kwargs):
         validate_data = self.serializer_class(data=request.data)
+
         if validate_data.is_valid():
-            validate_data.save(user_id=request.user)
+
+            # Obtener parent si viene
+            parent_uuid = request.data.get("parent_uuid", None)
+            parent = None
+
+            if parent_uuid:
+                try:
+                    parent = Comment.objects.filter(uuid=parent_uuid).first()
+                except Comment.DoesNotExist:
+                    parent = None
+
+            # Crear el comentario
+           
+            comment = validate_data.save(user_id=request.user)
+            if comment and parent:
+                comment.parent = parent
+                comment.save()
+
             ws_data = {
                 "event": "new_comment",
-                "video_id": validate_data.data['video_id'],
-                "content": validate_data.data['content'],
+                "video_id": comment.video_id.id,  # <-- CORRECTO
+                "content": comment.content,
                 "user_id": UserSerializers(request.user).data,
-                "created_at": str(validate_data.instance.created_at),
-                "uuid": validate_data.data['uuid'],
-                "comments_count": Video.objects.get(id=validate_data.data['video_id']).get_count_comment()
+                "created_at": str(comment.created_at),
+                "uuid": str(comment.uuid),
+                "parent_uuid": str(comment.parent.uuid) if comment.parent else None,
+                "comments_count": comment.video_id.get_count_comment()  # <-- CORRECTO
             }
+
             try:
                 requests.post("http://localhost:8001/create-comment/", json=ws_data)
             except Exception as e:
@@ -79,12 +100,8 @@ class CreateCommentApiView(APIView):
                 {"message": "Comentario creado correctamente", "data": validate_data.data},
                 status=status.HTTP_201_CREATED
             )
-    
-        return Response(
-            validate_data.errors,
-            status=status.HTTP_400_BAD_REQUEST
-        )
-    
+
+        return Response(validate_data.errors, status=status.HTTP_400_BAD_REQUEST)
 
 class CreateLikeApiView(APIView):
     permission_classes = [IsAuthenticated]

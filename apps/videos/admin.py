@@ -14,7 +14,7 @@ class GiftConfig(admin.ModelAdmin):
     search_fields = ("uuid",)
 
 admin.site.register(models.Video)
-admin.site.register(models.Comment)
+admin.site.register(models.Comment, GiftConfig)
 admin.site.register(models.Like)
 admin.site.register(models.Follower, FollowerConfig)
 admin.site.register(models.Notification)

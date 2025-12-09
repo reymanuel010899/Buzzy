@@ -16,17 +16,70 @@ class LikeSerializers(serializers.ModelSerializer):
     class Meta:
         model = Like
         fields = ("video_id",)
-
 class CommentSerializers(serializers.ModelSerializer):
     user_id = UserSerializers(read_only=True)
-    event = serializers.SerializerMethodField()
+    parent_uuid = serializers.UUIDField(write_only=True, required=False, allow_null=True)
+
     class Meta:
         model = Comment
-        fields = ("video_id", "content", "user_id", "uuid", "created_at", "event")
+        fields = ['uuid', 'video_id', 'content', 'user_id', 'created_at', 'parent']
+        extra_kwargs = {
+            "user_id": {"required": False},
+            "parent": {"required": False},
+        }
 
-    def get_event(self, obj):
-        return ""
+    # def create(self, validated_data):
+    #     # Sacamos el parent_uuid que viene del request
+    #     parent_uuid = validated_data.pop("parent_uuid", None)
+
+    #     parent = None
+    #     if parent_uuid:
+    #         parent = Comment.objects.filter(uuid=parent_uuid).first()
+
+    #     # No duplicamos `parent`
+    #     return Comment.objects.create(
+    #         parent=parent,
+    #         **validated_data
+    #     )
+
+    user_id = UserSerializers(read_only=True)
+    parent_uuid = serializers.UUIDField(write_only=True, required=False, allow_null=True)
+    class Meta:
+        model = Comment
+        fields = ("video_id", "content", "user_id", "uuid", "created_at", "parent_uuid")
+        extra_kwargs = {
+            "user": {"required": False},
+            "parent": {"required": False},
+        }
+
+    def create(self, validated_data):
+        # Sacamos parent del validated_data por si vino del request
+        parent = validated_data.pop("parent", None)
+
+        # Creamos el comentario correctamente
+        return Comment.objects.create(parent=parent, **validated_data)
     
+    # def get_event(self, obj):
+    #     return ""
+    
+
+
+    class Meta:
+        model = Comment
+        fields = ['uuid', 'video_id', 'content', 'user_id', 'created_at', 'parent_uuid']
+
+    def create(self, validated_data):
+        parent_uuid = validated_data.pop("parent_uuid", None)
+
+        parent = None
+        if parent_uuid:
+            try:
+                parent = Comment.objects.get(uuid=parent_uuid)
+            except Comment.DoesNotExist:
+                parent = None
+
+        return Comment.objects.create(parent=parent, **validated_data)
+
 class ViewSerializers(serializers.ModelSerializer):
     class Meta:
         model = View
@@ -41,7 +94,7 @@ class VideoZerializer(serializers.ModelSerializer):
     current_user_followered = serializers.SerializerMethodField()
     class Meta:
         model = Video
-        fields = ("id","category", "created_at",  "description", "duration","thumbnail_url", "user_id", "video_url", "video", "like_count", "comments_count", "view_acount", "liked", "current_user_followered", "uuid") 
+        fields = ("id","category", "created_at","tags",  "description", "duration","thumbnail_url", "user_id", "video_url", "video", "like_count", "comments_count", "view_acount", "liked", "current_user_followered", "uuid") 
 
     def get_like_count(self, obj):
         return obj.get_count_like()

@@ -156,7 +156,7 @@ class Video(models.Model):
     video_url = models.URLField()
     video = models.FileField(upload_to='contenido/', blank=True, null=True)
     thumbnail_url = models.URLField()
-    description = models.TextField()
+    description = models.TextField(blank=True, null=True)
     tags = models.JSONField()
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -181,6 +181,14 @@ class Video(models.Model):
 
 class Comment(models.Model):
     uuid = models.CharField(max_length=32, default=full_uuid, unique=True, null=True, blank=True)
+    parent = models.ForeignKey(
+        "self",
+        null=True,
+        blank=True,
+        on_delete=models.CASCADE,
+        related_name="replies"
+    )
+
     video_id = models.ForeignKey(Video, on_delete=models.CASCADE, related_name='comernt_video_reverce')
     user_id = models.ForeignKey(User, on_delete=models.CASCADE)
     content = models.TextField()
