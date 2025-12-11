@@ -9,7 +9,7 @@ from rest_framework.generics import ListAPIView
 from rest_framework.permissions import IsAuthenticated
 # from apps.wallet.models import WalletModel
 from .models import Comment, Follower, GiftStory, Like, Story, StoryGift, StoryLike, StoryMedia, StoryView, Video, View
-from .serializers import CommentSerializers, FollowerSerializer, GetGiftStorySerializer, GiftRecivedSerializer, GiftStorySerializer, LikeSerializers, StoryLikeSerializer, StorySerializer, StoryViewSerializer, UserSerializers, VideoZerializer, ViewSerializers, formated_created
+from .serializers import CommentSerializers, FollowerSerializer, GetGiftStorySerializer, GiftRecivedSerializer, GiftStorySerializer, LikeSerializers, ListCommentsZerializers, StoryLikeSerializer, StorySerializer, StoryViewSerializer, UserSerializers, VideoZerializer, ViewSerializers, formated_created
 # Create your views here.
 
 class ListMediaApiView(ListAPIView):
@@ -159,7 +159,7 @@ class CreateLikeApiView(APIView):
 
 
 class GetCommentsApiView(APIView):
-    serializer_class = CommentSerializers
+    serializer_class = ListCommentsZerializers
 
     def get(self, request, videoId, *args, **kwargs):
         video = Video.objects.get(uuid=videoId)

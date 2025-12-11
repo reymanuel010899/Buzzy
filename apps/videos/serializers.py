@@ -16,17 +16,19 @@ class LikeSerializers(serializers.ModelSerializer):
     class Meta:
         model = Like
         fields = ("video_id",)
+
+   
 class CommentSerializers(serializers.ModelSerializer):
     user_id = UserSerializers(read_only=True)
     parent_uuid = serializers.UUIDField(write_only=True, required=False, allow_null=True)
 
     class Meta:
         model = Comment
-        fields = ['uuid', 'video_id', 'content', 'user_id', 'created_at', 'parent']
+        fields = [ 'uuid','video_id', 'content', 'user_id', 'created_at', 'parent']
         extra_kwargs = {
             "user_id": {"required": False},
             "parent": {"required": False},
-        }
+        }   
 
     # def create(self, validated_data):
     #     # Sacamos el parent_uuid que viene del request
@@ -79,7 +81,14 @@ class CommentSerializers(serializers.ModelSerializer):
                 parent = None
 
         return Comment.objects.create(parent=parent, **validated_data)
-
+class ListCommentsZerializers(serializers.ModelSerializer):
+    user_id = UserSerializers(read_only=True)
+    # parent_uuid = serializers.UUIDField(write_only=True, required=False, allow_null=True)
+    parent = CommentSerializers(read_only=True)
+    class Meta:
+        model = Comment
+        fields = [ 'uuid','video_id', 'content', 'user_id', 'created_at', 'parent']
+        
 class ViewSerializers(serializers.ModelSerializer):
     class Meta:
         model = View
