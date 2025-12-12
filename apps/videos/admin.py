@@ -6,7 +6,7 @@ class StoryConfig(admin.ModelAdmin):
     search_fields = ("id",)
 
 class FollowerConfig(admin.ModelAdmin):
-    list_display = ("user_id__id", "follower_user_id__id")
+    list_display = ("user_id", "follower_user_id")
     search_fields = ("id",)
 
 class GiftConfig(admin.ModelAdmin):

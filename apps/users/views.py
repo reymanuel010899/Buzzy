@@ -15,6 +15,8 @@ class LoginView(APIView):
         email = request.data.get('email')
         password = request.data.get('password')
         user = User.objects.filter(email=email).first()
+        if not user:
+            return Response({"error": "Credenciales inválidas"}, status=status.HTTP_401_UNAUTHORIZED)
         if self.request.user and user.check_password(password):
             refresh = RefreshToken.for_user(user)
             return Response({

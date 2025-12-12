@@ -82,13 +82,13 @@ class CreateCommentApiView(APIView):
 
             ws_data = {
                 "event": "new_comment",
-                "video_id": comment.video_id.id,  # <-- CORRECTO
+                "video_id": comment.video_id.id,
                 "content": comment.content,
                 "user_id": UserSerializers(request.user).data,
                 "created_at": str(comment.created_at),
                 "uuid": str(comment.uuid),
-                "parent_uuid": str(comment.parent.uuid) if comment.parent else None,
-                "comments_count": comment.video_id.get_count_comment()  # <-- CORRECTO
+                "parent": self.serializer_class(comment.parent).data,
+                "comments_count": comment.video_id.get_count_comment()
             }
 
             try:
@@ -558,7 +558,7 @@ class GetOneGiftActiveApiView(APIView):
             "gift_video": gift.gift.video.url if gift.gift.video.url else None,
             "amount": gift.gift.token_price,
             "sender": gift.sender.username,
-            "from_user": request.user.id,
+            "to_user": gift.story.user.id,
             "color_premiun": gift.gift.color_premiun if gift.gift.color_premiun else "blue"
             # "total_gifts": story_media.story.received_gifts.count()
         }
