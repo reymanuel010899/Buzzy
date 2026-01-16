@@ -3,6 +3,7 @@ from . import views
 app_name = 'video'
 
 urlpatterns = [
+    # MEDIA
     path('api/list-home/', views.ListMediaApiView.as_view(), name='media-home'),
     path('api/create-view/', views.CreateViewApiView.as_view(), name='create-view'),
     path('api/create-comment/', views.CreateCommentApiView.as_view(), name='create-comment'),
@@ -24,4 +25,10 @@ urlpatterns = [
     path("api/stories/<str:story_uuid>/viewers/", views.StoryViewersApiView.as_view()),
     path("api/stories/<str:uuid>/delete/", views.DeleteStoryApiView.as_view()),
 
+    # MESSAGES
+    path('api/chats/', views.ChatListView.as_view(), name='chat-list'),
+    path('api/chats/<str:chat_uuid>/messages/', views.ChatMessagesView.as_view(), name='chat-messages'),
+    path('api/chats/send/', views.SendMessageView.as_view(), name='send-message'),
+    path('api/chats/<str:chat_uuid>/read/', views.MarkChatAsReadView.as_view(), name='mark-read'),
+    path('api/update-online-status/', views.UpdateOnlineStatusView.as_view(), name='update-online-status'),
 ]

@@ -1,5 +1,5 @@
+from django.shortcuts import get_object_or_404
 import requests
-from django.db.models import Q
 from django.utils import timezone
 from datetime import timedelta
 from rest_framework.response import Response
@@ -7,11 +7,12 @@ from rest_framework.views import APIView
 from rest_framework import status
 from rest_framework.generics import ListAPIView
 from rest_framework.permissions import IsAuthenticated
+from django.db.models import Q, Exists, OuterRef
 # from apps.wallet.models import WalletModel
-from .models import Comment, Follower, GiftStory, Like, Story, StoryGift, StoryLike, StoryMedia, StoryView, Video, View
-from .serializers import CommentSerializers, FollowerSerializer, GetGiftStorySerializer, GiftRecivedSerializer, GiftStorySerializer, LikeSerializers, ListCommentsZerializers, StoryLikeSerializer, StorySerializer, StoryViewSerializer, UserSerializers, VideoZerializer, ViewSerializers, formated_created
+from .models import ChatRoom, Comment, Follower, GiftStory, Like, Message, Story, StoryGift, StoryLike, StoryMedia, StoryView, UserOnlineStatus, Video, View, User
+from .serializers import ChatRoomSerializer, CommentSerializers, FollowerSerializer, GetGiftStorySerializer, GiftRecivedSerializer, GiftStorySerializer, LikeSerializers, ListCommentsZerializers, MessageSerializer, StoryLikeSerializer, StorySerializer, StoryViewSerializer, UserSerializers, VideoZerializer, ViewSerializers, formated_created
 # Create your views here.
-
+FASTAPI_WS_URL = "http://localhost:8001"
 class ListMediaApiView(ListAPIView):
     serializer_class = VideoZerializer
     def get_queryset(self):
@@ -204,7 +205,12 @@ class CreateFollowerApiView(APIView):
                 return Response(
                     {"message": "Dejado de seguir", "data": serialized_data.data},
                 )
-            
+            # else:
+            #     ChatRoom.objects.get_or_create(
+            #         participant1=request.user,
+            #         participant2=serialized_data.validated_data['follower_user_id']
+            #     )
+                
             ws_data = {
                     "event": "new_follower",
                     "current_user_followered": Follower.objects.filter(follower_user_id=serialized_data.validated_data['follower_user_id'], user_id=request.user).exists(),
@@ -492,7 +498,7 @@ class CreateGiftStoryView(APIView):
                 {"error": "No puedes enviarte regalos a tu propia historia"},
                 status=400
             )
-
+        obj, created = StoryView.objects.get_or_create(story=story_media.story, user=request.user)
         gift = StoryGift.objects.create(
             user=story_media.story.user,   # dueño de la historia
             sender=request.user,           # el que regala
@@ -595,6 +601,7 @@ class ListGiftRecivedApiView(APIView):
         return Response(serializer.data, status=status.HTTP_200_OK)
     
 class ListGiftRecivedByUserApiView(APIView):
+
     serializer_class = GiftRecivedSerializer
     permission_classes = [IsAuthenticated]
 
@@ -612,3 +619,189 @@ class ListGiftRecivedByUserApiView(APIView):
         gifts = StoryGift.objects.filter(user=user, story=story_media.story, is_active=True, created_at__gte=cutoff).order_by("-created_at")
         serializer = self.serializer_class(gifts, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
+    
+class ChatListView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        user = request.user
+
+        # Subconsulta: ¿existe al menos un mensaje en este chat?
+        has_messages = Message.objects.filter(chat_room=OuterRef('pk'))
+
+        chats = ChatRoom.objects.filter(
+            Q(participant1=user) | Q(participant2=user)
+        ).annotate(
+            has_msg=Exists(has_messages)
+        ).filter(
+            # Reglas de visibilidad:
+            Q(initiator=user)           # Yo inicié → siempre veo el chat (aunque no haya mensajes)
+            | Q(has_msg=True)           # Hay mensajes → ambos lo vemos
+        ).select_related(
+            'participant1', 'participant2', 'initiator'
+        ).order_by('-updated_at')
+
+        serializer = ChatRoomSerializer(chats, many=True, context={'request': request})
+        return Response({
+            "chats": serializer.data
+        }, status=status.HTTP_200_OK)
+
+# ========================
+# OBTENER MENSAJES DE UN CHAT
+# ========================
+class ChatMessagesView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, chat_uuid):
+        """Devuelve todos los mensajes de un chat específico"""
+        chat = get_object_or_404(ChatRoom, uuid=chat_uuid)
+        print(chat, "***")
+
+        # Verificar que el usuario pertenece al chat
+        if request.user not in (chat.participant1, chat.participant2):
+            return Response({"error": "No tienes acceso a este chat"}, status=status.HTTP_403_FORBIDDEN)
+
+        # Marcar mensajes como leídos
+        chat.reset_unread_count(request.user)
+
+        messages = chat.messages.filter(is_deleted=False).select_related('sender').order_by('created_at')
+        serializer = MessageSerializer(messages, many=True)
+
+        return Response({
+            "messages": serializer.data,
+            "chat_uuid": chat.uuid,
+            "other_user": ChatRoomSerializer(chat, context={'request': request}).data['other_user']
+        }, status=status.HTTP_200_OK)
+
+
+# ========================
+# ENVIAR MENSAJE NUEVO
+# ========================
+class SendMessageView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        """
+        Body esperado:
+        {
+            "recipient_id": 5,                    # ID del otro usuario
+            "content": "Hola! ¿Cómo estás?",
+            "message_type": "text" | "image" | "video" | "voice" | "gif"
+        }
+        """
+        recipient_id = request.data.get("recipient_id")
+        content = request.data.get("content", "").strip()
+        message_type = request.data.get("message_type", "text")
+
+        if not recipient_id:
+            return Response({"error": "recipient_id es requerido"}, status=status.HTTP_400_BAD_REQUEST)
+
+        if not content and message_type == "text":
+            return Response({"error": "El contenido no puede estar vacío"}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            recipient = User.objects.get(id=recipient_id)
+        except User.DoesNotExist:
+            return Response({"error": "Usuario no encontrado"}, status=status.HTTP_404_NOT_FOUND)
+
+        if recipient == request.user:
+            return Response({"error": "No puedes enviarte mensajes a ti mismo"}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Obtener o crear la sala de chat
+        if request.user.id < recipient.id:
+            chat, created = ChatRoom.objects.get_or_create(
+                participant1=request.user,
+                participant2=recipient
+            )
+        else:
+            chat, created = ChatRoom.objects.get_or_create(
+                participant1=recipient,
+                participant2=request.user
+            )
+
+        # Crear mensaje
+        message = Message.objects.create(
+            chat_room=chat,
+            sender=request.user,
+            content=content,
+            message_type=message_type,
+            file=request.FILES.get("file")  # Si envías imagen/video/voz
+        )
+
+        # Actualizar metadata del chat
+        chat.last_message_preview = content[:100] if content else "[Multimedia]"
+        chat.last_message_time = message.created_at
+        chat.updated_at = message.created_at
+
+        # Incrementar contador de no leídos del destinatario
+        if request.user == chat.participant1:
+            chat.unread_count_p2 += 1
+        else:
+            chat.unread_count_p1 += 1
+        chat.save()
+
+        # Preparar datos para WebSocket
+        message_data = MessageSerializer(message).data
+        ws_payload = {
+            "event": "send_message",
+            "type": "message",
+            "message": message_data,
+            "chat_uuid": chat.uuid,
+            "sender_id": request.user.id,
+            "recipient_id": recipient.id
+        }
+
+        # Enviar al FastAPI para broadcast en tiempo real
+        try:
+            requests.post(f"{FASTAPI_WS_URL}/broadcast-chat/", json=ws_payload, timeout=3)
+        except Exception as e:
+            print("Error enviando mensaje al WebSocket:", e)
+            # No fallar la API si el WS falla
+
+        return Response({
+            "status": "Mensaje enviado",
+            "message": message_data,
+            "chat_uuid": chat.uuid
+        }, status=status.HTTP_201_CREATED)
+
+
+# ========================
+# MARCAR CHAT COMO LEÍDO (opcional)
+# ========================
+class MarkChatAsReadView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, chat_uuid):
+        chat = get_object_or_404(ChatRoom, uuid=chat_uuid)
+
+        if request.user not in (chat.participant1, chat.participant2):
+            return Response({"error": "Acceso denegado"}, status=403)
+
+        chat.reset_unread_count(request.user)
+
+        return Response({"status": "Chat marcado como leído"})
+    
+class UpdateOnlineStatusView(APIView):
+    permission_classes = [IsAuthenticated]  # Cambia a IsAuthenticated + token en prod
+
+    def post(self, request):
+        user_id = request.data.get("user_id")
+        is_online = request.data.get("is_online", False)
+
+        if not user_id:
+            return Response({"error": "user_id requerido"}, status=400)
+
+        try:
+            user = User.objects.get(id=user_id)
+            status, created = UserOnlineStatus.objects.get_or_create(
+                user=user,
+                defaults={'is_online': False}
+            )
+            status.is_online = is_online
+            if not is_online:
+                status.last_seen = timezone.now()
+            status.save()
+
+            return Response({"status": "updated", "is_online": status.is_online})
+        except User.DoesNotExist:
+            return Response({"error": "Usuario no encontrado"}, status=404)

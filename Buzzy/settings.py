@@ -24,7 +24,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 # SECURITY WARNING: keep the secret key used in production secret!
 # , default=secrets.token_urlsafe(50)
-SECRET_KEY = secrets.token_urlsafe(50)
+SECRET_KEY = os.getenv("SECRET_KEY")
 
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
@@ -169,10 +169,10 @@ MEDIA_ROOT = BASE_DIR / 'media'
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
-# SESSION_COOKIE_SECURE = True  
-# SESSION_COOKIE_HTTPONLY = True  
-# CSRF_COOKIE_SECURE = True  
-# CSRF_COOKIE_HTTPONLY = True  
+SESSION_COOKIE_SECURE = True  
+SESSION_COOKIE_HTTPONLY = True  
+CSRF_COOKIE_SECURE = True  
+CSRF_COOKIE_HTTPONLY = True  
 
 
 #*********************** enable when i have domain *************************

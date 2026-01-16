@@ -2,7 +2,7 @@ from django.utils import timezone
 import datetime
 from datetime import timedelta
 from rest_framework import serializers
-from .models import Comment, Follower, GiftStory, Like, Story, StoryGift, StoryLike, StoryMedia, StoryView, Video, View
+from .models import Comment, Follower, GiftStory, Like, Story, StoryGift, StoryLike, StoryMedia, StoryView, Video, View, ChatRoom, Message, UserOnlineStatus
 from apps.users.models import User
 
 
@@ -206,4 +206,55 @@ class StoryLikeSerializer(serializers.ModelSerializer):
 
 
 
+
+class MessageSerializer(serializers.ModelSerializer):
+    sender_username = serializers.CharField(source='sender.username', read_only=True)
+    sender_avatar = serializers.CharField(source='sender.profile_picture', read_only=True)
+    
+    class Meta:
+        model = Message
+        fields = ['uuid', 'content', 'sender_username', 'sender_avatar', 'created_at', 'message_type']
+
+class ChatRoomSerializer(serializers.ModelSerializer):
+    other_user = serializers.SerializerMethodField()
+    last_message = serializers.SerializerMethodField()
+    unread_count = serializers.SerializerMethodField()
+    other_user_online = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = ChatRoom
+        fields = ['uuid', 'other_user', 'last_message', 'unread_count', 'updated_at', 'other_user_online']
+    
+    def get_other_user(self, obj):
+        user = self.context['request'].user
+        other = obj.get_other_participant(user)
+        return {
+            'id': other.id,
+            'username': other.username,
+            'name': other.first_name + ' ' + other.last_name,
+            'avatar': other.profile_picture.url if other.profile_picture else None,
+        }
+    
+    def get_last_message(self, obj):
+        last_msg = obj.messages.last()
+        return last_msg.content[:50] + '...' if last_msg else None
+    
+    def get_unread_count(self, obj):
+        user = self.context['request'].user
+        return obj.unread_count_p1 if user == obj.participant1 else obj.unread_count_p2
+    
+    def get_other_user_online(self, obj):
+        user = self.context['request'].user
+        other = obj.get_other_participant(user)
+        
+        status, created = UserOnlineStatus.objects.get_or_create(
+            user=other,
+            defaults={'is_online': False}
+        )
+        
+        return {
+            'is_online': status.is_online,
+            'last_seen': status.last_seen.isoformat() if not status.is_online else None
+        }
+    
 formated_created = StorySerializer()
