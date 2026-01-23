@@ -16,7 +16,7 @@ FASTAPI_WS_URL = "http://localhost:8001"
 class ListMediaApiView(ListAPIView):
     serializer_class = VideoZerializer
     def get_queryset(self):
-        return Video.objects.all()
+        return Video.objects.all().order_by("-created_at")
     
 class CreateViewApiView(APIView):
     permission_classes = [IsAuthenticated]
@@ -141,7 +141,8 @@ class CreateLikeApiView(APIView):
             "event": "like_updated",
             "video_id": video.id,
             "likes": like_count,
-            "liked": liked
+            "liked": liked,
+            "user_id": user.id
         }
 
         # Notificar en FastAPI

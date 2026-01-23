@@ -1,7 +1,0 @@
-version '22'
-
-services:
-  db:
-    
-    enviroment:
-        

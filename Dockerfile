@@ -1,34 +1,29 @@
-<<<<<<< HEAD
-FROM python:3.12
- 
-RUN mkdir /Buzzy-project
+FROM python:3.12-slim
 
-COPY requerimens.txt ./Buzzy-project/
+# Evita archivos .pyc y buffering
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
 
-COPY . ./Buzzy-project/
+# Directorio de trabajo
+WORKDIR /Buzzy-project
 
-WORKDIR ./Buzzy-project	
+# Copiamos requirements primero (mejor cache)
+COPY requerimens.txt .
 
-RUN python3 -m venv venv
+RUN pip install psycopg2-binary
+RUN pip install --upgrade pip \
+    && pip install -r requerimens.txt
 
-RUN python -m pip install -r requirements.txt
+# Copiamos el proyecto
+COPY . .
 
-RUN python3 manage.py runserver 0.0.0.0:8000
+# Migraciones y superuser
+# RUN python3 manage.py makemigrations --noinput
+# RUN python3 manage.py migrate --noinput
+# RUN python3 manage.py createsuperuser --noinput --username admin --email admin@example.com
+# RUN python3 manage.py changepassword --noinput admin <<< 'reymanuel010899'
 
-CMD ['python3', 'manage.py', 'runserver', '0.0.0.0:8000']
-=======
-FROM python3.10
+# Exponemos el puerto
+EXPOSE 8000
 
-ENV PYTHONUNBUFFERED 1
-
-RUN mkdir /buzzy-backend
-
-# COPY requerimens.txt ./buzzy-backend/
-
-COPY . ./buzzy-backend/
-
-RUN python3 -m venv venv
-
-RUN pip install -r requerimens.txt
-
->>>>>>> f506f38 (cambios)
+CMD ["python3", "manage.py", "runserver", "0.0.0.0:8000"]
