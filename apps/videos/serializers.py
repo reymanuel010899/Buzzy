@@ -13,6 +13,7 @@ class UserSerializers(serializers.ModelSerializer):
         fields = ("username", "email", 'profile_picture', 'id') 
 
 class LikeSerializers(serializers.ModelSerializer):
+    
     class Meta:
         model = Like
         fields = ("video_id",)

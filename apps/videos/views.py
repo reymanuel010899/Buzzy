@@ -1,3 +1,4 @@
+from re import L
 from django.shortcuts import get_object_or_404
 import requests
 from django.utils import timezone
@@ -37,6 +38,8 @@ class CreateViewApiView(APIView):
                 "event": "new_view",
                 "video_id": video.id,
                 "view_acount": video.get_count_view(),
+                "user_id": request.user.id,
+                "video_user_id": video.user_id.id,
                 # "liked": liked
             }
             try:
@@ -84,6 +87,7 @@ class CreateCommentApiView(APIView):
             ws_data = {
                 "event": "new_comment",
                 "video_id": comment.video_id.id,
+                "video_user_id": comment.video_id.user_id.id,
                 "content": comment.content,
                 "user_id": UserSerializers(request.user).data,
                 "created_at": str(comment.created_at),
@@ -135,14 +139,16 @@ class CreateLikeApiView(APIView):
 
         # Contador actualizado
         like_count = video.get_count_like()
-
+        print(f"Video {video.user_id.id} tiene ahora {like_count} likes.")
         # Data para el WebSocket
         ws_data = {
             "event": "like_updated",
             "video_id": video.id,
             "likes": like_count,
             "liked": liked,
-            "user_id": user.id
+            "liked_by_target": Like.objects.filter(video_id_id=video_id, user_id=video.user_id.id).exists(),
+            "user_id": user.id,
+            "video_user_id": video.user_id.id
         }
 
         # Notificar en FastAPI
@@ -656,7 +662,6 @@ class ChatMessagesView(APIView):
     def get(self, request, chat_uuid):
         """Devuelve todos los mensajes de un chat específico"""
         chat = get_object_or_404(ChatRoom, uuid=chat_uuid)
-        print(chat, "***")
 
         # Verificar que el usuario pertenece al chat
         if request.user not in (chat.participant1, chat.participant2):
@@ -740,7 +745,7 @@ class SendMessageView(APIView):
         else:
             chat.unread_count_p1 += 1
         chat.save()
-
+        print(chat.unread_count_p2, "*******")
         # Preparar datos para WebSocket
         message_data = MessageSerializer(message).data
         ws_payload = {
@@ -749,7 +754,8 @@ class SendMessageView(APIView):
             "message": message_data,
             "chat_uuid": chat.uuid,
             "sender_id": request.user.id,
-            "recipient_id": recipient.id
+            "recipient_id": recipient.id,
+            "unread_count_target": chat.unread_count_p2 if request.user == chat.participant1 else chat.unread_count_p1
         }
 
         # Enviar al FastAPI para broadcast en tiempo real

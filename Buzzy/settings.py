@@ -24,13 +24,14 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 # SECURITY WARNING: keep the secret key used in production secret!
 # , default=secrets.token_urlsafe(50)
-SECRET_KEY = os.getenv("SECRET_KEY")
+SECRET_KEY = "django-insecure-oc%3^t@1h$x-51t^stio!m4(+j%lf8owxt!j(3zj%qerv%c4"
 
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
 # ALLOWED_HOSTS = []
-ALLOWED_HOSTS = ["*"]
+ALLOWED_HOSTS = [os.getenv('BACKEND_URL', '*'), 'localhost', '127.0.0.1', '*']
+APPEND_SLASH = False
 
 
 # Application definition
@@ -88,6 +89,8 @@ TEMPLATES = [
 ]
 
 CORS_ALLOW_ALL_ORIGINS = True
+CORS_ALLOW_CREDENTIALS = True
+
 WSGI_APPLICATION = 'Buzzy.wsgi.application'
 
 CORS_ALLOWED_ORIGINS = [
@@ -109,12 +112,12 @@ CSRF_TRUSTED_ORIGINS = [
 # }
 DATABASES = {
     'default': {
-        'ENGINE': 'django.db.backends.postgresql',
-        'NAME': os.getenv("POSTGRES_DB"),
-        'USER': os.getenv("POSTGRES_USER"),
-        'PASSWORD': os.getenv("POSTGRES_PASSWORD"),
-        'HOST': 'db',
-        'PORT': '5432',
+            'ENGINE': 'django.db.backends.postgresql_psycopg2',
+            'NAME': os.getenv('POSTGRES_DB', os.getenv('DB_NAME', 'dbname')),
+            'USER': os.getenv('POSTGRES_USER', os.getenv('DB_USER', 'dbuser')),
+            'PASSWORD': os.getenv('POSTGRES_PASSWORD', os.getenv('DB_PASSWORD', 'password')),
+            'HOST': os.getenv('DB_HOST', 'localhost'),
+            'PORT': os.getenv('DB_PORT', '5432'),
     }
 }
 

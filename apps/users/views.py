@@ -74,10 +74,11 @@ class RegisterView(APIView):
         # Crear el usuario
         user = User.objects.create_user(email=email, username=username, password=password,  first_name=name)
         if user:
+            country_code = user.country.code if user.country else ""
             WalletModel.objects.create(
                 balance=0,
                 user=user,
-                pass_code=f"{user.country.code if user.country.code else '' }{str(uuid.uuid4())[:8]}".upper(),
+                pass_code=f"{country_code}{str(uuid.uuid4())[:8]}".upper(),
                 wallet_type='main'
             )
         # Generar tokens

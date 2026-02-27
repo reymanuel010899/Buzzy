@@ -6,9 +6,9 @@ from django.conf.urls.static import serve
 urlpatterns = [
     path('admin/', admin.site.urls),
     path('', include('apps.users.urls', namespace='users')),
-    path('media/', include('apps.videos.urls', namespace='video')),
-    path('wallet/', include('apps.wallet.urls', namespace='wallet')),
-    path('markerplace/', include('apps.markerplace.urls', namespace='markerplace')),
+    path('', include('apps.videos.urls', namespace='video')),
+    path('', include('apps.wallet.urls', namespace='wallet')),
+    path('', include('apps.markerplace.urls', namespace='markerplace')),
 ]
 
 urlpatterns += [

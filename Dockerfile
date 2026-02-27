@@ -17,6 +17,9 @@ RUN pip install --upgrade pip \
 # Copiamos el proyecto
 COPY . .
 
+RUN chmod +x entrypoint.sh
+
+
 # Migraciones y superuser
 # RUN python3 manage.py makemigrations --noinput
 # RUN python3 manage.py migrate --noinput
@@ -25,5 +28,5 @@ COPY . .
 
 # Exponemos el puerto
 EXPOSE 8000
-
+ENTRYPOINT ["/Buzzy-project/entrypoint.sh"]
 CMD ["python3", "manage.py", "runserver", "0.0.0.0:8000"]

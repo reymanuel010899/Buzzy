@@ -4,11 +4,11 @@ app_name = 'video'
 
 urlpatterns = [
     # MEDIA
-    path('api/list-home/', views.ListMediaApiView.as_view(), name='media-home'),
-    path('api/create-view/', views.CreateViewApiView.as_view(), name='create-view'),
-    path('api/create-comment/', views.CreateCommentApiView.as_view(), name='create-comment'),
-    path('api/create-like/', views.CreateLikeApiView.as_view(), name='create-like'),
-    path('api/get-comments/<str:videoId>/', views.GetCommentsApiView.as_view(), name='get-comments'),
+    path("api/list-home/", views.ListMediaApiView.as_view(), name='media-home'),
+    path("api/create-view/", views.CreateViewApiView.as_view(), name='create-view'),
+    path("api/create-comment/", views.CreateCommentApiView.as_view(), name='create-comment'),
+    path("api/create-like/", views.CreateLikeApiView.as_view(), name='create-like'),
+    path("api/get-comments/<str:videoId>/", views.GetCommentsApiView.as_view(), name='get-comments'),
     path("api/create-follower/", views.CreateFollowerApiView.as_view(), name="create-follower"),
 
     # HISTORY

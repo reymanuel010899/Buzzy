@@ -46,11 +46,6 @@ class ChatRoom(models.Model):
             models.Index(fields=['participant1', 'updated_at']),
             models.Index(fields=['participant2', 'updated_at']),
             models.Index(fields=['last_message_time']),
-             indexes.GinIndex(
-                fields=['last_message_preview'],
-                name='chatroom_lastmsg_gin_idx',  # nombre obligatorio
-                opclasses=['gin_trgm_ops']
-            ),
         ]
         verbose_name = 'Chat Room'
         verbose_name_plural = 'Chat Rooms'
