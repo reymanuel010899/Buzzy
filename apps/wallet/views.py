@@ -84,7 +84,8 @@ class WithdrawFundsView(APIView):
             # Based on user request "que pueda retirar fondo de mi app", usually we deduct immediately to prevent double-spending
             
             # Let's deduct immediately for withdrawals to be safe
-            wallet.balance -= amount
+            decimal_amount = Decimal(str(amount))
+            wallet.balance -= decimal_amount
             wallet.save()
 
             TransactionModel.objects.create(
