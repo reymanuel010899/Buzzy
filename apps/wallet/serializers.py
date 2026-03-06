@@ -7,7 +7,7 @@ class WalletSerializer(ModelSerializer):
     user= UserSerializers()
     class Meta:
         model=WalletModel
-        fields=('balance', 'user', 'pass_code', 'wallet_type')
+        fields=('balance', 'tokens', 'user', 'pass_code', 'wallet_type')
 
 
 class TransactiosCreateSerializer(ModelSerializer):

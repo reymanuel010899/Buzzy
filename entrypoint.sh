@@ -10,6 +10,7 @@ sleep 5
 echo "Ejecutando migraciones de base de datos..."
 python manage.py makemigrations --noinput
 python manage.py migrate --noinput
+python manage.py collectstatic --noinput
 
 # Ejecutar el comando original
 echo "Iniciando el servidor de Django..."

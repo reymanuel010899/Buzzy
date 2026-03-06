@@ -41,6 +41,7 @@ class WalletModel(models.Model):
 
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='wallets', null=True, blank=True)
     balance = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    tokens = models.PositiveIntegerField(default=0)  # New token balance for sending gifts
     currency = models.ForeignKey(CurrencyModel, on_delete=models.CASCADE, related_name='currency', null=True, blank=True)
 
     pass_code = models.CharField(max_length=18, default=uuid.uuid4, unique=True)
@@ -78,25 +79,49 @@ class TransactionModel(models.Model):
         ('transfer', 'Transfer'),
     )
 
+    TRANSACTION_STATUS = (
+        ('pending', 'Pending'),
+        ('completed', 'Completed'),
+        ('failed', 'Failed'),
+    )
+
     wallet = models.ForeignKey(WalletModel, on_delete=models.CASCADE, related_name='transactions')
     transaction_type = models.CharField(max_length=10, choices=TRANSACTION_TYPES)
+    status = models.CharField(max_length=10, choices=TRANSACTION_STATUS, default='completed')
     amount = models.DecimalField(max_digits=12, decimal_places=2)
     description = models.TextField(blank=True, null=True)
+    payment_id = models.CharField(max_length=255, blank=True, null=True) # Stripe Session or Payment ID
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     def __str__(self):
-        return f"Transaction {self.id} - {self.transaction_type} - {self.amount}"
+        return f"Transaction {self.id} - {self.transaction_type} - {self.status} - {self.amount}"
 
     class Meta:
         verbose_name = 'transaction'
         verbose_name_plural = 'transactions'
 
 
+@receiver(post_save, sender=User)
+def create_user_wallet(sender, instance, created, **kwargs):
+    if created:
+        # We ensure a default currency exists. Looking at CurrencyModel, 'USD' seems to be the default code.
+        currency, _ = CurrencyModel.objects.get_or_create(
+            code='USD',
+            defaults={'name': 'US Dollar', 'symbol': '$', 'type': 'fiat'}
+        )
+        WalletModel.objects.create(
+            user=instance,
+            balance=0.00,
+            tokens=100,  # Initial token bonus for new users
+            currency=currency,
+            wallet_type='main'
+        )
+
 @receiver(post_save, sender=TransactionModel)
 def update_wallet_balance(sender, instance, created, **kwargs):
-    if created:
+    if created and instance.status == 'completed':
         wallet = instance.wallet
         if instance.transaction_type == 'deposit':
             wallet.balance += instance.amount

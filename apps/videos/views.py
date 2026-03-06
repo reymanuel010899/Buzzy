@@ -10,7 +10,7 @@ from rest_framework.generics import ListAPIView
 from rest_framework.permissions import IsAuthenticated
 from django.db.models import Q, Exists, OuterRef
 # from apps.wallet.models import WalletModel
-from .models import ChatRoom, Comment, Follower, GiftStory, Like, Message, Story, StoryGift, StoryLike, StoryMedia, StoryView, UserOnlineStatus, Video, View, User
+from .models import ChatRoom, Comment, Follower, GiftStory, Like, Message, MessageReaction, Story, StoryGift, StoryLike, StoryMedia, StoryView, UserOnlineStatus, Video, View, User
 from .serializers import ChatRoomSerializer, CommentSerializers, FollowerSerializer, GetGiftStorySerializer, GiftRecivedSerializer, GiftStorySerializer, LikeSerializers, ListCommentsZerializers, MessageSerializer, StoryLikeSerializer, StorySerializer, StoryViewSerializer, UserSerializers, VideoZerializer, ViewSerializers, formated_created
 # Create your views here.
 FASTAPI_WS_URL = "http://localhost:8001"
@@ -63,6 +63,16 @@ class CreateCommentApiView(APIView):
     serializer_class = CommentSerializers
 
     def post(self, request, *args, **kwargs):
+        # Check subscription limits
+        try:
+            subscription = request.user.subscription
+            can_comment, message = subscription.can_post_comment()
+            if not can_comment:
+                return Response({"error": message}, status=status.HTTP_403_FORBIDDEN)
+        except Exception:
+            # User doesn't have a subscription record yet (should be rare due to signals)
+            pass
+
         validate_data = self.serializer_class(data=request.data)
 
         if validate_data.is_valid():
@@ -83,6 +93,15 @@ class CreateCommentApiView(APIView):
             if comment and parent:
                 comment.parent = parent
                 comment.save()
+
+            # Increment comment count for VIPs
+            try:
+                subscription = request.user.subscription
+                if subscription.plan and subscription.plan.name == 'VIP':
+                    subscription.comments_this_month += 1
+                    subscription.save()
+            except Exception:
+                pass
 
             ws_data = {
                 "event": "new_comment",
@@ -459,6 +478,9 @@ class DeleteStoryApiView(APIView):
 
         return Response({"message": "Historia eliminada"}, status=200)
 
+from apps.wallet.models import WalletModel
+from apps.wallet.serializers import WalletSerializer
+
 
 class CreateGiftStoryView(APIView):
     permission_classes = [IsAuthenticated]
@@ -505,6 +527,23 @@ class CreateGiftStoryView(APIView):
                 {"error": "No puedes enviarte regalos a tu propia historia"},
                 status=400
             )
+
+        # 3. Validar y descontar tokens del remitente
+        try:
+            wallet = WalletModel.objects.get(user=request.user)
+        except WalletModel.DoesNotExist:
+            return Response({"error": "No tienes una wallet configurada"}, status=400)
+
+        if wallet.tokens < gift_obj.token_price:
+            return Response(
+                {"error": "Tokens insuficientes para enviar este regalo", "insufficient_tokens": True},
+                status=400
+            )
+
+        # Descontar tokens
+        wallet.tokens -= int(gift_obj.token_price)
+        wallet.save()
+
         obj, created = StoryView.objects.get_or_create(story=story_media.story, user=request.user)
         gift = StoryGift.objects.create(
             user=story_media.story.user,   # dueño de la historia
@@ -542,7 +581,8 @@ class CreateGiftStoryView(APIView):
                     "story": str(story_media.story.uuid),
                     "from": request.user.username,
                     "to": story_media.story.user.username,
-                }
+                },
+                "wallet": WalletSerializer(wallet).data
             },
             status=201
         )
@@ -671,7 +711,7 @@ class ChatMessagesView(APIView):
         chat.reset_unread_count(request.user)
 
         messages = chat.messages.filter(is_deleted=False).select_related('sender').order_by('created_at')
-        serializer = MessageSerializer(messages, many=True)
+        serializer = MessageSerializer(messages, many=True, context={'request': request})
 
         return Response({
             "messages": serializer.data,
@@ -745,9 +785,9 @@ class SendMessageView(APIView):
         else:
             chat.unread_count_p1 += 1
         chat.save()
-        print(chat.unread_count_p2, "*******")
+
         # Preparar datos para WebSocket
-        message_data = MessageSerializer(message).data
+        message_data = MessageSerializer(message, context={'request': request}).data
         ws_payload = {
             "event": "send_message",
             "type": "message",
@@ -812,3 +852,55 @@ class UpdateOnlineStatusView(APIView):
             return Response({"status": "updated", "is_online": status.is_online})
         except User.DoesNotExist:
             return Response({"error": "Usuario no encontrado"}, status=404)
+class UserConnectionsListView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        user = request.user
+        
+        # Usuarios a los que sigo
+        following_ids = Follower.objects.filter(user_id=user).values_list('follower_user_id', flat=True)
+        # Usuarios que me siguen
+        followers_ids = Follower.objects.filter(follower_user_id=user).values_list('user_id', flat=True)
+        
+        # Combinar IDs únicos
+        connection_ids = set(list(following_ids) + list(followers_ids))
+        
+        # Obtener objetos User
+        connections = User.objects.filter(id__in=connection_ids).distinct()
+        
+        serializer = UserSerializers(connections, many=True, context={'request': request})
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class SaveMessageReactionView(APIView):
+    """
+    Called internally by BuzzySocket to persist a message reaction.
+    POST body: { message_uuid, user_id, emoji }
+    If reaction already exists → delete it (toggle). Else → create it.
+    """
+    permission_classes = []  # Internal endpoint – BuzzySocket calls without user session
+
+    def post(self, request):
+        message_uuid = request.data.get("message_uuid")
+        user_id = request.data.get("user_id")
+        emoji = request.data.get("emoji")
+
+        if not all([message_uuid, user_id, emoji]):
+            return Response({"error": "message_uuid, user_id, emoji are required"}, status=400)
+
+        try:
+            message = Message.objects.get(uuid=message_uuid)
+            user = User.objects.get(id=user_id)
+        except (Message.DoesNotExist, User.DoesNotExist):
+            return Response({"error": "Message or user not found"}, status=404)
+
+        reaction, created = MessageReaction.objects.get_or_create(
+            message=message, user=user, reaction=emoji
+        )
+        if not created:
+            # Toggle: already reacted → remove
+            reaction.delete()
+            return Response({"action": "removed", "username": user.username}, status=200)
+
+        return Response({"action": "added", "username": user.username}, status=201)

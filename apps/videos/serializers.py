@@ -2,15 +2,25 @@ from django.utils import timezone
 import datetime
 from datetime import timedelta
 from rest_framework import serializers
-from .models import Comment, Follower, GiftStory, Like, Story, StoryGift, StoryLike, StoryMedia, StoryView, Video, View, ChatRoom, Message, UserOnlineStatus
+from .models import Comment, Follower, GiftStory, Like, Story, StoryGift, StoryLike, StoryMedia, StoryView, Video, View, ChatRoom, Message, UserOnlineStatus, MessageReaction
 from apps.users.models import User
 
 
 class UserSerializers(serializers.ModelSerializer):
      profile_picture = serializers.ImageField(use_url=False)
+     subscription_status = serializers.SerializerMethodField()
+
      class Meta:
         model = User
-        fields = ("username", "email", 'profile_picture', 'id') 
+        fields = ("username", "email", 'profile_picture', 'id', 'subscription_status') 
+
+     def get_subscription_status(self, obj):
+        from apps.subscriptions.serializers import UserSubscriptionSerializer
+        # Get the subscription associated with the user
+        subscription = getattr(obj, 'subscription', None)
+        if subscription:
+            return UserSubscriptionSerializer(subscription).data
+        return None
 
 class LikeSerializers(serializers.ModelSerializer):
     
@@ -211,10 +221,18 @@ class StoryLikeSerializer(serializers.ModelSerializer):
 class MessageSerializer(serializers.ModelSerializer):
     sender_username = serializers.CharField(source='sender.username', read_only=True)
     sender_avatar = serializers.CharField(source='sender.profile_picture', read_only=True)
-    
+    reactions = serializers.SerializerMethodField()
+
+    def get_reactions(self, obj):
+        """Return { emoji: [username, ...] } grouped dict"""
+        result = {}
+        for r in obj.reactions.select_related('user').all():
+            result.setdefault(r.reaction, []).append(r.user.username)
+        return result
+
     class Meta:
         model = Message
-        fields = ['uuid', 'content', 'sender_username', 'sender_avatar', 'created_at', 'message_type']
+        fields = ['uuid', 'content', 'sender_username', 'sender_avatar', 'created_at', 'message_type', 'file', 'reactions']
 
 class ChatRoomSerializer(serializers.ModelSerializer):
     other_user = serializers.SerializerMethodField()

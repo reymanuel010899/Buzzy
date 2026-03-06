@@ -1,5 +1,6 @@
 from django.urls import path
 from . import views
+from . import search_views
 app_name = 'video'
 
 urlpatterns = [
@@ -10,6 +11,11 @@ urlpatterns = [
     path("api/create-like/", views.CreateLikeApiView.as_view(), name='create-like'),
     path("api/get-comments/<str:videoId>/", views.GetCommentsApiView.as_view(), name='get-comments'),
     path("api/create-follower/", views.CreateFollowerApiView.as_view(), name="create-follower"),
+
+    # SEARCH
+    path("api/search/global/", search_views.GlobalSearchView.as_view(), name="global-search"),
+    path("api/search/trending/", search_views.TrendingListView.as_view(), name="trending-search"),
+    path("api/search/recent/", search_views.RecentSearchView.as_view(), name="recent-search"),
 
     # HISTORY
     path("api/stories/create/", views.CreateStoryApiView.as_view()),
@@ -31,4 +37,6 @@ urlpatterns = [
     path('api/chats/send/', views.SendMessageView.as_view(), name='send-message'),
     path('api/chats/<str:chat_uuid>/read/', views.MarkChatAsReadView.as_view(), name='mark-read'),
     path('api/update-online-status/', views.UpdateOnlineStatusView.as_view(), name='update-online-status'),
+    path('api/social/connections/', views.UserConnectionsListView.as_view(), name='social-connections'),
+    path('api/messages/reaction/', views.SaveMessageReactionView.as_view(), name='save-reaction'),
 ]

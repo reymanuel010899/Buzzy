@@ -79,8 +79,15 @@ class Message(models.Model):
             ('text', 'Texto'),
             ('image', 'Imagen'),
             ('video', 'Video'),
+            ('audio', 'Audio'), # Added 'audio' choice
             ('voice', 'Nota de voz'),
             ('gif', 'GIF'),
+            ('file', 'Archivo'),
+            ('document', 'Documento'),
+            ('contact', 'Contacto'),
+            ('poll', 'Encuesta'),
+            ('event', 'Evento'),
+            ('sticker', 'Sticker'),
         ],
         default='text'
     )
