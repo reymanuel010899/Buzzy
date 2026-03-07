@@ -1,6 +1,7 @@
 from re import L
 from django.shortcuts import get_object_or_404
 import requests
+import settings
 from django.utils import timezone
 from datetime import timedelta
 from rest_framework.response import Response
@@ -12,6 +13,10 @@ from django.db.models import Q, Exists, OuterRef
 # from apps.wallet.models import WalletModel
 from .models import ChatRoom, Comment, Follower, GiftStory, Like, Message, MessageReaction, Story, StoryGift, StoryLike, StoryMedia, StoryView, UserOnlineStatus, Video, View, User
 from .serializers import ChatRoomSerializer, CommentSerializers, FollowerSerializer, GetGiftStorySerializer, GiftRecivedSerializer, GiftStorySerializer, LikeSerializers, ListCommentsZerializers, MessageSerializer, StoryLikeSerializer, StorySerializer, StoryViewSerializer, UserSerializers, VideoZerializer, ViewSerializers, formated_created
+from apps.wallet.models import WalletModel
+from apps.wallet.serializers import WalletSerializer
+
+
 # Create your views here.
 FASTAPI_WS_URL = "http://localhost:8001"
 class ListMediaApiView(ListAPIView):
@@ -477,9 +482,6 @@ class DeleteStoryApiView(APIView):
             pass
 
         return Response({"message": "Historia eliminada"}, status=200)
-
-from apps.wallet.models import WalletModel
-from apps.wallet.serializers import WalletSerializer
 
 
 class CreateGiftStoryView(APIView):

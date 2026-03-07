@@ -199,6 +199,7 @@ CSRF_COOKIE_SECURE = True
 CSRF_COOKIE_HTTPONLY = True  
 
 
+WEBSOCKET_URL = os.getenv("WEBSOCKET_URL", "ws://localhost:8001/")
 #*********************** enable when i have domain *************************
 # SECURE_BROWSER_XSS_FILTER = True  # Enables XSS protection in browsers
 # SECURE_CONTENT_TYPE_NOSNIFF = True  # Prevents MIME-type sniffing
