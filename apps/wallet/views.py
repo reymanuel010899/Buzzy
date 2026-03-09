@@ -175,3 +175,48 @@ class BuyTokensApiView(APIView):
             "data": serializer.data
         }, status=status.HTTP_200_OK)
 
+
+from .models import BankAccount
+from .serializers import BankAccountSerializer
+
+class BankAccountListCreateView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        accounts = BankAccount.objects.filter(user=request.user)
+        serializer = BankAccountSerializer(accounts, many=True)
+        return Response(serializer.data)
+
+    def post(self, request):
+        serializer = BankAccountSerializer(data=request.data, context={'request': request})
+        if serializer.is_valid():
+            serializer.save(user=request.user)
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+class BankAccountDeleteView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def delete(self, request, pk):
+        try:
+            account = BankAccount.objects.get(pk=pk, user=request.user)
+        except BankAccount.DoesNotExist:
+            return Response({'error': 'Cuenta no encontrada'}, status=status.HTTP_404_NOT_FOUND)
+        
+        # Restriction: Cannot delete the last bank account
+        if BankAccount.objects.filter(user=request.user).count() <= 1:
+            return Response(
+                {'error': 'No puedes eliminar tu única cuenta bancaria. Debes agregar otra primero.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        account.delete()
+        
+        # If deleted primary, make another one primary
+        if account.is_primary:
+            next_account = BankAccount.objects.filter(user=request.user).first()
+            if next_account:
+                next_account.is_primary = True
+                next_account.save()
+                
+        return Response({'message': 'Cuenta bancaria eliminada correctamente'}, status=status.HTTP_200_OK)

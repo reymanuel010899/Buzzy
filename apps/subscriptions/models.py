@@ -58,7 +58,7 @@ class UserSubscription(models.Model):
         if self.plan.name == 'PLUS':
             limit = 3
         elif self.plan.name == 'FRIEND':
-            limit = 10
+            limit = 5
         
         if limit == 0:
             return False, "Tu plan no incluye llamadas."

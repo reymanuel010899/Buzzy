@@ -1,5 +1,7 @@
 .env
 .venv
+venv/
+venv
 secretos
 media
 video*.mp4

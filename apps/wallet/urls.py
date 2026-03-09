@@ -8,4 +8,7 @@ urlpatterns = [
     path('api/buy-tokens/', views.BuyTokensApiView.as_view(), name='buy-tokens'),
     path('api/create-deposit-session/', views.CreateDepositSessionView.as_view(), name='create-deposit-session'),
     path('api/withdraw-funds/', views.WithdrawFundsView.as_view(), name='withdraw-funds'),
+    path('api/wallet/bank-accounts/', views.BankAccountListCreateView.as_view(), name='bank-accounts-list-create'),
+    path('api/wallet/bank-accounts/<int:pk>/', views.BankAccountDeleteView.as_view(), name='bank-accounts-delete'),
+
 ]

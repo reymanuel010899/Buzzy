@@ -252,7 +252,16 @@ class ChatRoomSerializer(serializers.ModelSerializer):
             'username': other.username,
             'name': other.first_name + ' ' + other.last_name,
             'avatar': other.profile_picture.url if other.profile_picture else None,
+            'profile_video': other.profile_video.url if other.profile_video else None,
+            'subscription_status': self.get_subscription_status(other),
         }
+    
+    def get_subscription_status(self, user):
+        from apps.subscriptions.serializers import UserSubscriptionSerializer
+        subscription = getattr(user, 'subscription', None)
+        if subscription and subscription.is_active:
+            return UserSubscriptionSerializer(subscription).data
+        return None
     
     def get_last_message(self, obj):
         last_msg = obj.messages.last()

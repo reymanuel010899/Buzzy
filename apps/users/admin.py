@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models import Country, User
+from .models import Country, User, Availability, SocialAccount
 # Register your models here.
 class UserConfig(admin.ModelAdmin):
     list_display = ("id", "username")
@@ -7,3 +7,5 @@ class UserConfig(admin.ModelAdmin):
 
 admin.site.register(User, UserConfig)
 admin.site.register(Country)
+admin.site.register(Availability)
+admin.site.register(SocialAccount)

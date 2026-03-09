@@ -128,3 +128,32 @@ def update_wallet_balance(sender, instance, created, **kwargs):
         elif instance.transaction_type == 'withdrawal':
             wallet.balance -= instance.amount
         wallet.save()
+
+class BankAccount(models.Model):
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='bank_accounts')
+    account_holder_name = models.CharField(max_length=255)
+    bank_name = models.CharField(max_length=255)
+    
+    # Encrypted fields
+    encrypted_account_number = models.TextField()
+    encrypted_routing_number = models.TextField(blank=True, null=True)
+    
+    # Metadata
+    is_primary = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = 'Bank Account'
+        verbose_name_plural = 'Bank Accounts'
+
+    def __str__(self):
+        return f"{self.bank_name} - {self.account_holder_name}"
+
+    @property
+    def masked_account_number(self):
+        from .utils import decrypt_data
+        raw = decrypt_data(self.encrypted_account_number)
+        if len(raw) > 4:
+            return f"****{raw[-4:]}"
+        return "****"

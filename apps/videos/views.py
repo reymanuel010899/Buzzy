@@ -1,7 +1,7 @@
 from re import L
 from django.shortcuts import get_object_or_404
 import requests
-import settings
+from django.conf import settings
 from django.utils import timezone
 from datetime import timedelta
 from rest_framework.response import Response
@@ -48,7 +48,7 @@ class CreateViewApiView(APIView):
                 # "liked": liked
             }
             try:
-                requests.post("http://localhost:8001/create-view/", json=ws_data)
+                requests.post(f"{settings.FASTAPI_WS_URL}/create-view/", json=ws_data)
             except Exception as e:
                 print("Error enviando evento WS:", e)
 
@@ -121,7 +121,7 @@ class CreateCommentApiView(APIView):
             }
 
             try:
-                requests.post("http://localhost:8001/create-comment/", json=ws_data)
+                requests.post(f"{settings.FASTAPI_WS_URL}/create-comment/", json=ws_data)
             except Exception as e:
                 print("Error enviando evento WS:", e)
 
@@ -177,7 +177,7 @@ class CreateLikeApiView(APIView):
 
         # Notificar en FastAPI
         try:
-            requests.post("http://localhost:8001/broadcast-like/", json=ws_data)
+            requests.post(f"http://localhost:8001/broadcast-like/", json=ws_data)
         except Exception as e:
             print("Error enviando evento WS:", e)
 
@@ -227,7 +227,7 @@ class CreateFollowerApiView(APIView):
                     "channel_profile": serialized_data.validated_data['follower_user_id'].id
                 }
                 try:
-                    requests.post("http://localhost:8001/broadcast-follower/", json=ws_data)
+                    requests.post(f"{settings.FASTAPI_WS_URL}/broadcast-follower/", json=ws_data)
                 except Exception as e:
                     return Response(
                         {"message": "Error de websocket", "data": serialized_data.data},
@@ -236,12 +236,7 @@ class CreateFollowerApiView(APIView):
                 return Response(
                     {"message": "Dejado de seguir", "data": serialized_data.data},
                 )
-            # else:
-            #     ChatRoom.objects.get_or_create(
-            #         participant1=request.user,
-            #         participant2=serialized_data.validated_data['follower_user_id']
-            #     )
-                
+
             ws_data = {
                     "event": "new_follower",
                     "current_user_followered": Follower.objects.filter(follower_user_id=serialized_data.validated_data['follower_user_id'], user_id=request.user).exists(),
@@ -249,7 +244,7 @@ class CreateFollowerApiView(APIView):
                 }
             serialized_data.save(user_id=request.user)
             try:
-                requests.post("http://localhost:8001/broadcast-follower/", json=ws_data)
+                requests.post(f"{settings.FASTAPI_WS_URL}/broadcast-follower/", json=ws_data)
             except Exception as e:
                 print("Error enviando evento WS:", e)
             return Response(
@@ -298,7 +293,7 @@ class CreateStoryApiView(APIView):
         }
 
         try:
-            requests.post("http://localhost:8001/broadcast-story/", json=ws_data)
+            requests.post(f"{settings.FASTAPI_WS_URL}/broadcast-story/", json=ws_data)
         except:
             pass
 
@@ -339,7 +334,7 @@ class CreateStoryLikeView(APIView):
         }
 
         try:
-            requests.post("http://localhost:8001/broadcast-story/", json=ws_data)
+            requests.post(f"{settings.FASTAPI_WS_URL}/broadcast-story/", json=ws_data)
         except:
             pass
 
@@ -370,12 +365,11 @@ class ListActiveStoriesApiView(APIView):
             created_at__gte=cutoff
         ).select_related('user') \
          .prefetch_related('media') \
-         .order_by('-created_at')  # más recientes primero
+         .order_by('-created_at') 
 
         # 3. (Opcional pero PRO) → Ordenar para que tu story siempre aparezca PRIMERO
         story_list = list(stories)
 
-        # Separar tu story (si existe)
         my_stories = [s for s in story_list if s.user_id == user.id]
         others_stories = [s for s in story_list if s.user_id != user.id]
         final_stories = my_stories + others_stories
@@ -426,7 +420,7 @@ class ViewStoryApiView(APIView):
         }
 
         try:
-            requests.post("http://localhost:8001/broadcast-story/", json=ws_data)
+            requests.post(f"{settings.FASTAPI_WS_URL}/broadcast-story/", json=ws_data)
         except:
             pass
 
@@ -477,7 +471,7 @@ class DeleteStoryApiView(APIView):
         }
 
         try:
-            requests.post("http://localhost:8001/broadcast-story/", json=ws_data)
+            requests.post(f"{settings.FASTAPI_WS_URL}/broadcast-story/", json=ws_data)
         except:
             pass
 
@@ -570,7 +564,7 @@ class CreateGiftStoryView(APIView):
         }
 
         try:
-            requests.post("http://localhost:8001/broadcast-story/", json=ws_data, timeout=2)
+            requests.post(f"{settings.FASTAPI_WS_URL}/broadcast-story/", json=ws_data, timeout=2)
         except Exception:
             pass
 
@@ -619,10 +613,10 @@ class GetOneGiftActiveApiView(APIView):
         }
 
         try:
-            requests.post("http://localhost:8001/broadcast-gift-story/", json=ws_data)
-            
+            requests.post(f"{settings.FASTAPI_WS_URL}/broadcast-gift-story/", json=ws_data)
+
         except Exception as e:
-            print("errpr",e )
+            print("error",e )
 
         serializer = self.serializer_class(gift)
         gift.is_active=False
@@ -695,9 +689,8 @@ class ChatListView(APIView):
             "chats": serializer.data
         }, status=status.HTTP_200_OK)
 
-# ========================
+
 # OBTENER MENSAJES DE UN CHAT
-# ========================
 class ChatMessagesView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -722,9 +715,7 @@ class ChatMessagesView(APIView):
         }, status=status.HTTP_200_OK)
 
 
-# ========================
 # ENVIAR MENSAJE NUEVO
-# ========================
 class SendMessageView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -814,9 +805,9 @@ class SendMessageView(APIView):
         }, status=status.HTTP_201_CREATED)
 
 
-# ========================
-# MARCAR CHAT COMO LEÍDO (opcional)
-# ========================
+
+# MARCAR CHAT COMO LEÍDO 
+
 class MarkChatAsReadView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -831,7 +822,7 @@ class MarkChatAsReadView(APIView):
         return Response({"status": "Chat marcado como leído"})
     
 class UpdateOnlineStatusView(APIView):
-    permission_classes = [IsAuthenticated]  # Cambia a IsAuthenticated + token en prod
+    permission_classes = [IsAuthenticated] 
 
     def post(self, request):
         user_id = request.data.get("user_id")

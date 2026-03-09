@@ -67,6 +67,14 @@ STRIPE_SECRET_KEY = os.getenv('STRIPE_SECRET_KEY', 'sk_test_placeholder')
 STRIPE_WEBHOOK_SECRET = os.getenv('STRIPE_WEBHOOK_SECRET', 'whsec_placeholder')
 FRONTEND_URL = os.getenv('FRONTEND_URL', 'http://localhost:5173')
 
+# Social OAuth Credentials
+INSTAGRAM_CLIENT_ID = os.getenv('INSTAGRAM_CLIENT_ID', '')
+INSTAGRAM_CLIENT_SECRET = os.getenv('INSTAGRAM_CLIENT_SECRET', '')
+TIKTOK_CLIENT_KEY = os.getenv('TIKTOK_CLIENT_KEY', '')
+TIKTOK_CLIENT_SECRET = os.getenv('TIKTOK_CLIENT_SECRET', '')
+FACEBOOK_APP_ID = os.getenv('FACEBOOK_APP_ID', '')
+FACEBOOK_APP_SECRET = os.getenv('FACEBOOK_APP_SECRET', '')
+
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
@@ -199,7 +207,9 @@ CSRF_COOKIE_SECURE = True
 CSRF_COOKIE_HTTPONLY = True  
 
 
-WEBSOCKET_URL = os.getenv("WEBSOCKET_URL", "ws://localhost:8001/")
+FASTAPI_WS_URL = os.getenv("FASTAPI_WS_URL", "http://localhost:8001")
+BACKEND_URL=os.getenv("BACKEND_URL", "http://localhost:8000")
+
 #*********************** enable when i have domain *************************
 # SECURE_BROWSER_XSS_FILTER = True  # Enables XSS protection in browsers
 # SECURE_CONTENT_TYPE_NOSNIFF = True  # Prevents MIME-type sniffing
