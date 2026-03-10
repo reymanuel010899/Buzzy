@@ -10,7 +10,7 @@ class DetailedUserSerializer(serializers.ModelSerializer):
     followed_all_acount = serializers.SerializerMethodField(read_only=True)
     is_following = serializers.SerializerMethodField(read_only=True)
     subscription_status = serializers.SerializerMethodField(read_only=True)
-
+    
     class Meta:
         model = models.User
         fields = ('id','first_name', 'email', 'profile_picture', 'profile_video', 'like_all_count', 'comments_all_count', 'view_all_acount', 'follower_all_acount', 'total_social_followers', 'followed_all_acount', 'is_following', 'subscription_status')

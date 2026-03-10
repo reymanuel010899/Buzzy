@@ -418,7 +418,6 @@ class VideoHashtag(models.Model):
 
 @receiver(post_save, sender=Follower)
 def create_chat_on_follow(sender, instance, created, **kwargs):
-    print("--------------------")
     if not created:
         return
 

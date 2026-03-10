@@ -17,7 +17,7 @@ from apps.videos.serializers import  VideoZerializer
 from apps.videos.models import Video
 from .models import Availability, User, SocialAccount
 from .serializers import DetailedUserSerializer, SocialAccountSerializer
-
+from apps.videos.models import ChatRoom
 class LoginView(APIView):
     def post(self, request):
         email = request.data.get('email')
@@ -112,8 +112,19 @@ class DetaildUser(APIView):
     def get(self, request, username, *args, **kwargs):
         user = User.objects.get(username=username)
         serialised_user = self.serializer_class(user, context={'request': request})
+
+        chat_room = ChatRoom.objects.filter(
+            participant1=user,
+            participant2=request.user
+        )
+
+        print(chat_room, "**")
+
+        user_data = serialised_user.data
+        user_data["chat_uuid"] = chat_room[0].uuid if chat_room.exists() else ""
+
         return Response({
-            "user":  serialised_user.data,
+            "user": user_data
         }, status=status.HTTP_200_OK)
     
 

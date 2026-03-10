@@ -247,8 +247,10 @@ class CreateFollowerApiView(APIView):
                 requests.post(f"{settings.FASTAPI_WS_URL}/broadcast-follower/", json=ws_data)
             except Exception as e:
                 print("Error enviando evento WS:", e)
+
+            chat_room = ChatRoom.objects.filter(participant1=serialized_data.validated_data['follower_user_id'], participant2=request.user)
             return Response(
-                {"message": "Seguiendo correctamente", "data": serialized_data.data},
+                {"message": "Seguiendo correctamente", "data": serialized_data.data, "chat_uuid": chat_room[0].uuid if len(chat_room) > 0 else  "" },
                 status=status.HTTP_201_CREATED
             )
 
