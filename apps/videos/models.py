@@ -354,6 +354,7 @@ class Video(models.Model):
     duration = models.PositiveIntegerField()
 
 
+
     def get_count_view(self):
         return self.video_reverce.count()
     

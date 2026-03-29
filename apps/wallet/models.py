@@ -25,6 +25,23 @@ class CurrencyModel(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
+    #wallet_type = models.CharField(max_length=10, choices=WALLET_TYPES, default='main')
+
+    bonus_balance = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    blocked_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+
+    total_deposited = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    total_withdrawn = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+
+    last_transaction_at = models.DateTimeField(null=True, blank=True)
+
+    is_active = models.BooleanField(default=True)
+
+    version = models.IntegerField(default=1)
+
+    created_at = models.DateTimeField(auto_now_add=True, blank=True, null=True)
+    updated_at = models.DateTimeField(auto_now=True,  blank=True, null=True)
+
     def __str__(self):
         return f"{self.code} - {self.name}"
 
