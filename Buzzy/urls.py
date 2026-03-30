@@ -12,6 +12,7 @@ urlpatterns = [
     path('', include('apps.markerplace.urls', namespace='markerplace')),
     path('api/subscriptions/', include('apps.subscriptions.urls')),
     path('api/ads/', include('apps.ads.urls')),
+    path('api/recommendations/', include('apps.recommendations.urls')),
 ]
 
 urlpatterns += [

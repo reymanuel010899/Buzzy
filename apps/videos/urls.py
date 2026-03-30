@@ -7,7 +7,7 @@ app_name = 'video'
 urlpatterns = [
     # MEDIA
     path("api/list-home/", views.ListMediaApiView.as_view(), name='media-home'),
-    path("api/v1/feed/next/", views.RecommendationFeedApiView.as_view(), name='feed-next'),
+    path("api/videos/create/", views.VideoUploadAPIView.as_view(), name='video-upload'),
     path("api/create-view/", views.CreateViewApiView.as_view(), name='create-view'),
     path("api/videos/track-event/", views.VideoEventView.as_view(), name='track-video-event'),
     path("api/create-comment/", views.CreateCommentApiView.as_view(), name='create-comment'),

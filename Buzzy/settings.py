@@ -58,6 +58,7 @@ LOCAL_APPS = [
     'apps.markerplace',
     'apps.subscriptions',
     'apps.ads',
+    'apps.recommendations',
 ]
 
 INSTALLED_APPS  = DJANGO_APPS + TRHE_PARTY_APPS + LOCAL_APPS
@@ -124,22 +125,23 @@ CSRF_TRUSTED_ORIGINS = [
 # Database
 # https://docs.djangoproject.com/en/4.2/ref/settings/#databases
 
-DATABASES = {
-     'default': {
-         'ENGINE': 'django.db.backends.sqlite3',
-         'NAME': BASE_DIR / 'db.sqlite3',
-     }
-}
 #DATABASES = {
 #     'default': {
-#            'ENGINE': 'django.db.backends.postgresql_psycopg2',
-#            'NAME': os.getenv('POSTGRES_DB', os.getenv('DB_NAME', 'dbname')),
-#             'USER': os.getenv('POSTGRES_USER', os.getenv('DB_USER', 'dbuser')),
-#             'PASSWORD': os.getenv('POSTGRES_PASSWORD', os.getenv('DB_PASSWORD', 'password')),
-#             'HOST': os.getenv('DB_HOST', 'localhost'),
-#             'PORT': os.getenv('DB_PORT', '5432'),
+#        'ENGINE': 'django.db.backends.sqlite3',
+#         'NAME': BASE_DIR / 'db.sqlite3',
 #     }
 #}
+
+DATABASES = {
+     'default': {
+            'ENGINE': os.getenv('POSTGRES_ENGINE', os.getenv('DB_NAME', 'dbname')),
+            'NAME': os.getenv('POSTGRES_DB', os.getenv('DB_NAME', 'dbname')),
+            'USER': os.getenv('POSTGRES_USER', os.getenv('DB_USER', 'dbuser')),
+            'PASSWORD': os.getenv('POSTGRES_PASSWORD', os.getenv('DB_PASSWORD', 'password')),
+            'HOST': os.getenv('DB_HOST', 'localhost'),
+            'PORT': os.getenv('DB_PORT', '5432'),
+     }
+}
 
 
 AUTH_USER_MODEL = 'users.User'
@@ -241,3 +243,30 @@ FIREBASE_SERVICE_ACCOUNT_PATH = os.getenv(
 # SECURE_HSTS_SECONDS = 31536000  # Enforce HTTPS for 1 year (adjust as needed)
 # SECURE_HSTS_INCLUDE_SUBDOMAINS = True  # Apply HSTS to subdomains
 # SECURE_HSTS_PRELOAD = True  # Allow browser preloading of HSTS policy
+
+
+# Celery Configuration
+# 1. Definimos la URL base de Redis (puedes usar la misma para caché y Celery)
+REDIS_URL = os.getenv('REDIS_URL', 'redis://localhost:6379/1')
+
+# 2. Configuración de Celery
+CELERY_BROKER_URL = os.getenv('CELERY_BROKER_URL', REDIS_URL)
+CELERY_RESULT_BACKEND = os.getenv('CELERY_RESULT_BACKEND', REDIS_URL)
+
+CELERY_ACCEPT_CONTENT = ['application/json']
+CELERY_TASK_SERIALIZER = 'json'
+CELERY_RESULT_SERIALIZER = 'json'
+
+# Asegúrate de que TIME_ZONE esté definido antes de esta línea en tu settings.py
+CELERY_TIMEZONE = TIME_ZONE 
+
+# Opcional: Configuración para django-redis (si lo instalaste para el motor de recomendaciones)
+CACHES = {
+    "default": {
+        "BACKEND": "django_redis.cache.RedisCache",
+        "LOCATION": os.getenv('REDIS_URL', 'redis://localhost:6379/0'), # Base 0 para caché
+        "OPTIONS": {
+            "CLIENT_CLASS": "django_redis.client.DefaultClient",
+        }
+    }
+}

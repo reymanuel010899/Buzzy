@@ -336,12 +336,20 @@ class VideoGift(models.Model):
     
 
 class Video(models.Model):
+    STATUS_CHOICES = [
+        ('pending', 'Pending Upload'),
+        ('processing', 'AI Processing'),
+        ('ready', 'Ready for Feed'),
+        ('blocked', 'Blocked (Unsafe)'),
+    ]
+
     uuid = models.CharField(max_length=32, default=full_uuid, unique=True, blank=True)
     user_id = models.ForeignKey(User, on_delete=models.CASCADE, related_name='user_reverce' ) 
     category = models.ForeignKey(Category, on_delete=models.CASCADE, blank=True, null=True)
-    video_url = models.URLField()
+    video_url = models.URLField(blank=True, null=True)
     video = models.FileField(upload_to='contenido/', blank=True, null=True)
-    thumbnail_url = models.URLField()
+    thumbnail_url = models.URLField(blank=True, null=True)
+    audit_log = models.JSONField(default=dict, blank=True)
     description = models.TextField(blank=True, null=True)
     tags = models.JSONField()
     media_type = models.CharField(
@@ -349,9 +357,14 @@ class Video(models.Model):
         choices=[('video', 'Video'), ('image', 'Imagen')], 
         default='video'
     )
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
+    is_safe = models.BooleanField(default=False)
+    safety_label = models.CharField(max_length=255, blank=True, null=True)
+    transcript = models.TextField(blank=True, null=True)
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
-    duration = models.PositiveIntegerField()
+    duration = models.PositiveIntegerField(blank=True, null=True)
 
 
 

@@ -4,6 +4,7 @@ from django.shortcuts import get_object_or_404
 import requests
 from django.conf import settings
 from apps.subscriptions.models import UserSubscription
+from apps.recommendations.services import record_video_view, update_user_interests
 from django.utils import timezone
 from datetime import timedelta
 from rest_framework.response import Response
@@ -42,7 +43,7 @@ FASTAPI_WS_URL = "http://localhost:8001"
 class ListMediaApiView(ListAPIView):
     serializer_class = VideoZerializer
     def get_queryset(self):
-        return Video.objects.all().order_by("-created_at")
+        return Video.objects.filter(status='ready').order_by("-created_at")
     
 class CreateViewApiView(APIView):
     permission_classes = [IsAuthenticated]
@@ -72,6 +73,8 @@ class CreateViewApiView(APIView):
             except Exception as e:
                 print("Error enviando evento WS:", e)
 
+            record_video_view(request.user.id, video.id)
+            update_user_interests(request.user.id, video.category.id, 'view')
             return Response(
                 {"message": "Vista registrada correctamente"},
                 status=status.HTTP_201_CREATED
@@ -303,7 +306,8 @@ class CreateLikeApiView(APIView):
 
         # Respuesta HTTP
         message = "Like creado correctamente" if liked else "Like eliminado correctamente"
-
+        
+        update_user_interests(request.user.id, video.category.id, 'like')
         return Response(
             {"message": message, "data": ws_data},
             status=status.HTTP_201_CREATED if liked else status.HTTP_200_OK
@@ -825,6 +829,7 @@ class CreateGiftVideoView(APIView):
         except Exception:
             pass
 
+        update_user_interests(request.user.id, video.category.id, 'gift')
         return Response(
             {
                 "message": "Regalo enviado correctamente",
@@ -1240,67 +1245,64 @@ class UserSuggestionsView(APIView):
 
         return Response(results, status=status.HTTP_200_OK)
 
-class RecommendationFeedApiView(APIView):
+from rest_framework.parsers import MultiPartParser, FormParser
+from .tasks import process_video_ai
+
+class VideoUploadAPIView(APIView):
+    """
+    Endpoint para subir videos de forma asíncrona.
+    Soporta formato multipart/form-data.
+    Guarda el video en estado 'pending' y lanza la tarea de IA.
+    """
     permission_classes = [IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser]
 
     def post(self, request):
-        user_interests = request.data.get("user_interests", {}) # {category_id: weight}
-        last_cursor = request.data.get("last_cursor")
-        limit = request.data.get("limit", 10)
-
-        # 1. Base query: Videos not seen by user
-        seen_videos = View.objects.filter(user_id=request.user).values_list('video_id', flat=True)
-        queryset = Video.objects.exclude(id__in=seen_videos)
-
-        if last_cursor:
-            queryset = queryset.filter(created_at__lt=last_cursor)
-
-        # 2. Scoring Logic
-        seven_days_ago = timezone.now() - timedelta(days=7)
-        now_epoch = timezone.now().timestamp()
+        video_file = request.FILES.get('video')
+        description = request.data.get('description', '')
         
-        interest_cases = [
-            When(category_id=cat_id, then=Value(float(weight)))
-            for cat_id, weight in user_interests.items()
-            if weight > 0
-        ]
+        if not video_file:
+            return Response({"error": "No files provided"}, status=status.HTTP_400_BAD_REQUEST)
+            
+        video = Video.objects.create(
+            user_id=request.user,
+            video=video_file,
+            description=description,
+            status='pending',
+            is_safe=False,
+            tags=[]
+        )
         
-        if not interest_cases:
-            interest_score_expr = Value(0.0)
-        else:
-            interest_score_expr = Case(*interest_cases, default=Value(0.0), output_field=FloatField())
+        # Lanzar la tarea de moderación con IA en Celery
+        try:
+            process_video_ai.delay(video.id)
+        except Exception as e:
+            # Fallback en caso de que Celery no esté corriendo
+            print(f"Error lanzando Celery: {e}")
+            video.status = 'blocked'
+            video.safety_label = 'Error interno Celery'
+            video.save()
+            return Response({"error": "Error interno del servidor de procesamiento."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            
+        return Response({
+            "message": "Video uploaded, AI processing started",
+            "video_id": video.id,
+            "status": video.status
+        }, status=status.HTTP_201_CREATED)
 
-        videos = queryset.annotate(
-            interest_match=interest_score_expr,
-            recency=ExpressionWrapper(
-                (Extract(F('created_at'), 'epoch') - seven_days_ago.timestamp()) / (max(now_epoch - seven_days_ago.timestamp(), 1)),
-                output_field=FloatField()
-            )
-        ).annotate(
-            final_score=ExpressionWrapper(
-                (F('recency') * 0.3) + (F('interest_match') * 0.7),
-                output_field=FloatField()
-            )
-        ).order_by('-final_score')[:limit * 2]
+    def get(self, request):
+        video_id = request.query_params.get('id')
+        if not video_id:
+            return Response({"error": "ID not provided"}, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            video = Video.objects.get(id=video_id)
+            return Response({
+                "id": video.id,
+                "status": video.status,
+                "is_safe": video.is_safe,
+                "safety_label": video.safety_label
+            })
+        except Video.DoesNotExist:
+            return Response({"error": "Video not found"}, status=status.HTTP_404_NOT_FOUND)
 
-        video_list = list(videos)
-        if not video_list:
-            return Response([], status=status.HTTP_200_OK)
-
-        # 70/30 exploitation/exploration
-        exploitation_count = int(limit * 0.7)
-        exploration_count = limit - exploitation_count
-
-        top_candidates = video_list[:exploitation_count]
-        remaining_candidates = video_list[exploitation_count:]
-
-        if len(remaining_candidates) > exploration_count:
-            exploration_candidates = random.sample(remaining_candidates, exploration_count)
-        else:
-            exploration_candidates = remaining_candidates
-
-        final_selection = top_candidates + exploration_candidates
-        random.shuffle(final_selection)
-
-        serializer = VideoZerializer(final_selection, many=True, context={'request': request})
-        return Response(serializer.data, status=status.HTTP_200_OK)
