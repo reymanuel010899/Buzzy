@@ -14,7 +14,8 @@ import secrets
 from datetime import timedelta
 from pathlib import Path
 from dotenv import load_dotenv
-load_dotenv()
+from celery.schedules import crontab
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -22,15 +23,16 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/4.2/howto/deployment/checklist/
 
-# SECURITY WARNING: keep the secret key used in production secret!
-# , default=secrets.token_urlsafe(50)
-SECRET_KEY = "django-insecure-oc%3^t@1h$x-51t^stio!m4(+j%lf8owxt!j(3zj%qerv%c4"
+# SECURITY — all sensitive values from environment only
+_secret = os.getenv('SECRET_KEY')
+if not _secret:
+    raise RuntimeError("SECRET_KEY environment variable is required and must not be empty.")
+SECRET_KEY = _secret
 
-# SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+DEBUG = os.getenv('DEBUG', 'False').lower() in ('true', '1', 'yes')
 
-# ALLOWED_HOSTS = []
-ALLOWED_HOSTS = [os.getenv('BACKEND_URL', '*'), 'localhost', '127.0.0.1', '*']
+_allowed = os.getenv('ALLOWED_HOSTS', 'localhost,127.0.0.1')
+ALLOWED_HOSTS = [h.strip() for h in _allowed.split(',') if h.strip()]
 APPEND_SLASH = True
 
 
@@ -59,6 +61,8 @@ LOCAL_APPS = [
     'apps.subscriptions',
     'apps.ads',
     'apps.recommendations',
+    'apps.banners',
+    'apps.referrals',
 ]
 
 INSTALLED_APPS  = DJANGO_APPS + TRHE_PARTY_APPS + LOCAL_APPS
@@ -68,6 +72,7 @@ STRIPE_PUBLIC_KEY = os.getenv('STRIPE_PUBLIC_KEY', 'pk_test_placeholder')
 STRIPE_SECRET_KEY = os.getenv('STRIPE_SECRET_KEY', 'sk_test_placeholder')
 STRIPE_WEBHOOK_SECRET = os.getenv('STRIPE_WEBHOOK_SECRET', 'whsec_placeholder')
 FRONTEND_URL = os.getenv('FRONTEND_URL', 'http://localhost:5173')
+PLAY_STORE_URL = os.getenv('PLAY_STORE_URL', 'https://play.google.com/store/apps/details?id=com.buzzy.app')
 
 # Social OAuth Credentials
 INSTAGRAM_CLIENT_ID = os.getenv('INSTAGRAM_CLIENT_ID', '')
@@ -84,6 +89,7 @@ MIDDLEWARE = [
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
+    'apps.users.middleware.UserLanguageMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware'
 ]
@@ -108,20 +114,15 @@ TEMPLATES = [
 
 CORS_ALLOW_ALL_ORIGINS = True
 CORS_ALLOW_CREDENTIALS = True
+CORS_ALLOW_PRIVATE_NETWORK = True
 
 WSGI_APPLICATION = 'Buzzy.wsgi.application'
 
-CORS_ALLOWED_ORIGINS = [
-    "http://localhost:5173",
-    "http://10.0.0.41:5173",
-     "http://localhost:5000"
-]
-CSRF_TRUSTED_ORIGINS = [
-    "http://localhost:5173",
-    "http://localhost:5000",
-    "http://127.0.0.1:5173",
-    "http://127.0.0.1:5000"
-]
+_cors_env = os.getenv('CORS_ALLOWED_ORIGINS', 'http://localhost:5173,http://localhost:5000')
+CORS_ALLOWED_ORIGINS = [o.strip() for o in _cors_env.split(',') if o.strip()]
+
+_csrf_env = os.getenv('CSRF_TRUSTED_ORIGINS', 'http://localhost:5173,http://localhost:5000,http://127.0.0.1:5173')
+CSRF_TRUSTED_ORIGINS = [o.strip() for o in _csrf_env.split(',') if o.strip()]
 # Database
 # https://docs.djangoproject.com/en/4.2/ref/settings/#databases
 
@@ -172,17 +173,25 @@ REST_FRAMEWORK = {
 }
 
 SIMPLE_JWT = {
-    'ACCESS_TOKEN_LIFETIME': timedelta(days=700),
-    'REFRESH_TOKEN_LIFETIME': timedelta(days=7),
+    'ACCESS_TOKEN_LIFETIME': timedelta(hours=int(os.getenv('JWT_ACCESS_HOURS', '24'))),
+    'REFRESH_TOKEN_LIFETIME': timedelta(days=int(os.getenv('JWT_REFRESH_DAYS', '7'))),
     'ROTATE_REFRESH_TOKENS': True,
     'BLACKLIST_AFTER_ROTATION': True,
     'AUTH_HEADER_TYPES': ('Bearer',),
+    'UPDATE_LAST_LOGIN': True,
 }
 
 # Internationalization
 # https://docs.djangoproject.com/en/4.2/topics/i18n/
 
 LANGUAGE_CODE = 'en-us'
+
+LANGUAGES = [
+    ('en', 'English'),
+    ('es', 'Español'),
+]
+
+LOCALE_PATHS = [BASE_DIR / 'locale']
 
 TIME_ZONE = 'America/Santo_Domingo'
 
@@ -222,27 +231,45 @@ CSRF_COOKIE_HTTPONLY = True
 
 
 FASTAPI_WS_URL = os.getenv("FASTAPI_WS_URL", "http://localhost:8001")
-SOCKET_URL = FASTAPI_WS_URL # Alias for internal broadcasts
-BACKEND_URL=os.getenv("BACKEND_URL", "http://localhost:8000")
+SOCKET_URL = FASTAPI_WS_URL
+BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
+# Shared secret used by Django → FastAPI internal broadcast calls
+BROADCAST_SECRET = os.getenv("BROADCAST_SECRET", "")
 
 GOOGLE_API_KEY=os.getenv("GOOGLE_API_KEY", "")
+
+# xAI Grok Imagine — generación de imágenes y videos
+XAI_API_KEY = os.getenv("XAI_API_KEY", "")
+AI_DRY_RUN = os.getenv("AI_DRY_RUN", "false").lower() == "true"
+
+# BytePlus (legacy — ya no se usa, se mantiene por si acaso)
+BYTEPLUS_ACCESS_KEY = os.getenv("BYTEPLUS_ACCESS_KEY", "")
+BYTEPLUS_SECRET_KEY = os.getenv("BYTEPLUS_SECRET_KEY", "")
+BYTEPLUS_REGION     = os.getenv("BYTEPLUS_REGION", "ap-singapore-1")
+
+
 AGORA_APP_ID = os.getenv("AGORA_APP_ID", "")
 AGORA_APP_CERTIFICATE = os.getenv("AGORA_APP_CERTIFICATE", "")
 AGORA_CUSTOMER_ID = os.getenv("AGORA_CUSTOMER_ID", "")
 AGORA_CUSTOMER_SECRET = os.getenv("AGORA_CUSTOMER_SECRET", "")
+AGORA_WEBHOOK_SECRET = os.getenv("AGORA_WEBHOOK_SECRET", "")
 FIREBASE_SERVER_KEY = os.getenv("FIREBASE_SERVER_KEY", "")
-FIREBASE_SERVICE_ACCOUNT_PATH = os.getenv(
-    "FIREBASE_SERVICE_ACCOUNT_PATH",
-    str(BASE_DIR / "buzzy-app-8086f-firebase-adminsdk-fbsvc-2772bee6a1.json"),
-)
+FIREBASE_SERVICE_ACCOUNT_PATH = os.getenv("FIREBASE_SERVICE_ACCOUNT_PATH", "")
 
-#*********************** enable when i have domain *************************
-# SECURE_BROWSER_XSS_FILTER = True  # Enables XSS protection in browsers
-# SECURE_CONTENT_TYPE_NOSNIFF = True  # Prevents MIME-type sniffing
-# SECURE_SSL_REDIRECT = True  # Redirect all HTTP requests to HTTPS
-# SECURE_HSTS_SECONDS = 31536000  # Enforce HTTPS for 1 year (adjust as needed)
-# SECURE_HSTS_INCLUDE_SUBDOMAINS = True  # Apply HSTS to subdomains
-# SECURE_HSTS_PRELOAD = True  # Allow browser preloading of HSTS policy
+# Security headers — active in production (DEBUG=False), disabled in local dev
+SECURE_BROWSER_XSS_FILTER = True
+SECURE_CONTENT_TYPE_NOSNIFF = True
+X_FRAME_OPTIONS = 'DENY'
+if not DEBUG:
+    # En producción, SSL redirect activo por defecto. Deshabilitar solo si el proxy ya lo hace.
+    SECURE_SSL_REDIRECT = os.getenv('SECURE_SSL_REDIRECT', 'True').lower() in ('true', '1')
+    # HSTS: 1 año por defecto en producción (31536000 segundos)
+    SECURE_HSTS_SECONDS = int(os.getenv('SECURE_HSTS_SECONDS', '31536000'))
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = True
+    SECURE_HSTS_PRELOAD = True
+    SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
 
 
 # Celery Configuration
@@ -258,7 +285,54 @@ CELERY_TASK_SERIALIZER = 'json'
 CELERY_RESULT_SERIALIZER = 'json'
 
 # Asegúrate de que TIME_ZONE esté definido antes de esta línea en tu settings.py
-CELERY_TIMEZONE = TIME_ZONE 
+CELERY_TIMEZONE = TIME_ZONE
+
+CELERY_BEAT_SCHEDULE = {
+    'expire-campaigns-every-15min': {
+        'task': 'apps.ads.tasks.expire_campaigns',
+        'schedule': crontab(minute='*/15'),
+    },
+    # Snapshot de vistas monetizables nuevas — corre cada noche a las 23:50
+    'snapshot-monetizable-views-nightly': {
+        'task': 'wallet.snapshot_monetizable_views',
+        'schedule': crontab(hour=23, minute=50),
+    },
+    # Liquidación semanal — cada lunes a las 02:00 AM
+    'settle-weekly-earnings-monday': {
+        'task': 'wallet.settle_weekly_earnings',
+        'schedule': crontab(hour=2, minute=0, day_of_week=1),
+    },
+    # Refresco de seguidores en redes sociales — cada domingo a las 03:00 AM
+    'refresh-social-followers-weekly': {
+        'task': 'apps.users.tasks.refresh_all_social_followers',
+        'schedule': crontab(hour=3, minute=0, day_of_week=0),
+    },
+    # Elimina regalos no abiertos después de 30 días — cada noche a las 12:00 AM
+    'expire-unopened-gifts-nightly': {
+        'task': 'apps.videos.tasks.expire_unopened_gifts',
+        'schedule': crontab(hour=0, minute=0),
+    },
+    # Banners: sincroniza grupos automáticos cada hora
+    'banners-sync-groups-hourly': {
+        'task': 'banners.sync_groups',
+        'schedule': crontab(minute=0),
+    },
+    # Banners: desactiva banners expirados cada 15 minutos
+    'banners-expire-every-15min': {
+        'task': 'banners.expire_banners',
+        'schedule': crontab(minute='*/15'),
+    },
+    # Banners: limpieza mensual de BannerView de banners inactivos
+    'banners-cleanup-views-monthly': {
+        'task': 'banners.cleanup_old_views',
+        'schedule': crontab(hour=4, minute=0, day_of_month=1),
+    },
+    # Referidos: elimina tokens de un solo uso no usados que ya expiraron (cada hora)
+    'referrals-delete-expired-tokens-hourly': {
+        'task': 'referrals.delete_expired_tokens',
+        'schedule': crontab(minute=0),
+    },
+}
 
 # Opcional: Configuración para django-redis (si lo instalaste para el motor de recomendaciones)
 CACHES = {

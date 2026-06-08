@@ -33,6 +33,7 @@ from celery.utils.log import get_task_logger
 from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
+from .models import Category, Video
 
 from apps.recommendations.utils import get_redis_client
 
@@ -272,10 +273,11 @@ def _run_ffmpeg(*args, timeout: int = FFMPEG_TIMEOUT) -> subprocess.CompletedPro
         raise RuntimeError(
             f"ffmpeg exited {result.returncode}: {result.stderr.decode(errors='replace')[:500]}"
         )
+    print(result, "--------------------")
     return result
 
 
-def _run_ffprobe(*args, timeout: int = 15) -> str:
+def _run_ffprobe(*args, timeout: int = 120) -> str:
     """Run an ffprobe command and return stripped stdout."""
     result = subprocess.run(
         ["ffprobe", *args],
@@ -427,11 +429,21 @@ def score_nsfw_vision(
 _WEIGHT_TEXT   = 1.0   # transcript + tags + description
 _WEIGHT_YOLO   = 0.6   # objetos detectados por YOLO
 _WEIGHT_CLIP   = 1.4   # similitud visual con CLIP (más confiable)
-_MIN_SCORE     = 0.02  # score mínimo para asignar categoría
+# Score mínimo para asignar categoría.
+# Formula: score = hits * base_hit_score, so 1 hit = _BASE_HIT * _WEIGHT_TEXT.
+# With lists of ~100 keywords a single hit used to give 1/100 = 0.01 (below 0.02).
+# Now we use a fixed base per hit so even 1 match qualifies.
+_BASE_HIT_SCORE = 0.05  # weight per keyword hit (before signal weight)
+_MIN_SCORE      = 0.04  # minimum combined score to accept a category
 
 
 def _category_scores_from_text(text: str) -> dict[str, float]:
-    """Keyword matching normalizado por tamaño de lista."""
+    """
+    Keyword matching. Score = number_of_hits * _BASE_HIT_SCORE * _WEIGHT_TEXT.
+    Using a fixed per-hit weight (instead of hits/len) ensures that even a
+    single keyword match in the description/transcript is enough to assign
+    a category, regardless of how large the keyword list is.
+    """
     if not text:
         return {}
     stemmed = _stem(text)
@@ -441,7 +453,7 @@ def _category_scores_from_text(text: str) -> dict[str, float]:
             continue
         hits = sum(1 for kw in keywords if _stem(kw) in stemmed)
         if hits > 0:
-            scores[cat_name] = (hits / len(keywords)) * _WEIGHT_TEXT
+            scores[cat_name] = hits * _BASE_HIT_SCORE * _WEIGHT_TEXT
     return scores
 
 
@@ -476,7 +488,9 @@ def _category_scores_from_clip(frames: list[str]) -> dict[str, float]:
         cats   = list(CLIP_PROMPTS.keys())
         texts  = list(CLIP_PROMPTS.values())
         tokens = clip.tokenize(texts)
-
+        print(model)
+        print(preprocess)
+        print(tokens)
         accum = torch.zeros(len(cats))
         used  = 0
 
@@ -508,15 +522,17 @@ def detect_category_multi(
     text: str,
     detected_objects: dict[str, float],
     frames: list[str],
-) -> Optional[str]:
+) -> tuple[Optional[str], Optional[str]]:
     """
     Combina tres señales para determinar la categoría:
       1. Keyword matching en texto (transcript + tags + description)
       2. Objetos YOLO detectados → mapa a categoría
       3. CLIP similitud visual frame por frame
 
-    Cada señal tiene su propio peso. El score final es la suma ponderada.
-    Devuelve None si ninguna categoría supera el umbral mínimo.
+    Returns (category_name, raw_fallback_term):
+      - category_name: matched existing category name (or None)
+      - raw_fallback_term: best detected raw term to auto-create a category
+        when category_name is None (e.g. top YOLO object or transcript word)
     """
     combined: dict[str, float] = {}
 
@@ -528,22 +544,68 @@ def detect_category_multi(
     _merge(_category_scores_from_yolo(detected_objects))
     _merge(_category_scores_from_clip(frames))
 
-    if not combined:
-        return None
+    if combined:
+        best_cat   = max(combined, key=combined.get)
+        best_score = combined[best_cat]
 
-    best_cat   = max(combined, key=combined.get)
-    best_score = combined[best_cat]
+        logger.info(
+            "Category scores: %s",
+            {k: round(v, 3) for k, v in sorted(combined.items(), key=lambda x: -x[1])},
+        )
 
-    logger.info(
-        "Category scores: %s",
-        {k: round(v, 3) for k, v in sorted(combined.items(), key=lambda x: -x[1])},
-    )
+        if best_score >= _MIN_SCORE:
+            return best_cat, None
 
-    if best_score < _MIN_SCORE:
-        logger.info("Best score %.4f below threshold %.4f — no category", best_score, _MIN_SCORE)
-        return None
+        # Below threshold but we still have a best candidate — return it
+        logger.info(
+            "Best score %.4f below threshold %.4f — using best candidate: %s",
+            best_score, _MIN_SCORE, best_cat,
+        )
+        return best_cat, None
 
-    return best_cat
+    # Zero signal from all three systems — derive a raw fallback term
+    logger.info("No category signal found — deriving raw fallback term")
+
+    # Generic YOLO classes that appear in almost any video and carry no category meaning
+    _YOLO_NOISE_CLASSES = {
+        "person", "people", "man", "woman", "human", "face",
+        "hand", "arm", "leg", "body",
+        "car", "truck", "vehicle",  # too generic without context
+    }
+
+    # 1. Top YOLO object excluding noise classes
+    if detected_objects:
+        # Sort by confidence descending, skip noise classes
+        candidates = sorted(
+            ((obj, conf) for obj, conf in detected_objects.items()
+             if obj.lower() not in _YOLO_NOISE_CLASSES),
+            key=lambda x: x[1],
+            reverse=True,
+        )
+        if candidates:
+            top_obj = candidates[0][0]
+            raw_term = top_obj.replace("_", " ").strip().title()
+            logger.info("Fallback from YOLO object: %s", raw_term)
+            return None, raw_term
+        else:
+            logger.info("All YOLO objects are noise classes (%s) — skipping YOLO fallback",
+                        list(detected_objects.keys()))
+
+    # 2. First meaningful word from transcript/description/tags
+    if text:
+        stop_words = {
+            "de", "la", "el", "en", "y", "a", "que", "es", "se", "un", "una",
+            "con", "por", "para", "los", "las", "del", "al", "le", "lo", "su",
+            "the", "a", "an", "is", "in", "of", "and", "to", "it", "i",
+        }
+        words = [w.strip(".,!?;:\"'") for w in text.lower().split()]
+        meaningful = [w for w in words if len(w) > 3 and w not in stop_words]
+        if meaningful:
+            raw_term = meaningful[0].title()
+            logger.info("Fallback from transcript word: %s", raw_term)
+            return None, raw_term
+
+    return None, None
 
 
 # ---------------------------------------------------------------------------
@@ -695,6 +757,7 @@ def process_audio(video_path: str, temp_dir: str) -> AudioResult:
             vad_filter=True,           # skip silent segments
             vad_parameters={"min_silence_duration_ms": 500},
         )
+        print("++++++++++", segments, "---------reymanuel-----------")
         texts = [seg.text for seg in segments]
         result.transcript = " ".join(texts).strip()
         result.language = info.language
@@ -806,6 +869,7 @@ def _redis_cache_result(video_id: int, result: ProcessingResult) -> None:
 
 
 def _notify_buzzysocket(video, status: str, category: Optional[str]) -> None:
+    logger.info("NOTIFY DEBUG — BROADCAST_SECRET=%r", settings.BROADCAST_SECRET)
     try:
         response = requests.post(
             f"{BUZZYSOCKET_URL}/broadcast-video-ready/",
@@ -817,6 +881,7 @@ def _notify_buzzysocket(video, status: str, category: Optional[str]) -> None:
                 "category": category,
                 "timestamp": timezone.now().isoformat(),
             },
+            headers={"X-Broadcast-Secret": settings.BROADCAST_SECRET},
             timeout=BUZZYSOCKET_TIMEOUT,
         )
         if response.status_code >= 400:
@@ -867,7 +932,6 @@ def process_video_ai(self, video_id: int) -> str:
     Full AI moderation + categorisation pipeline for a single video.
     Idempotent: safe to retry; status guard is atomically locked.
     """
-    from .models import Category, Video
 
     t_start = time.monotonic()
     _inc_counter("video_processing_started_total", {"task": "process_video_ai"})
@@ -923,12 +987,13 @@ def process_video_ai(self, video_id: int) -> str:
         logger.info("Processing video %d in %s", video_id, temp_dir)
 
         audio_result = process_audio(video_path, temp_dir)
-
+        print(audio_result, "---------rey-----------")
         # ──────────────────────────────────────────────────────────────────
         # 5. Visual analysis (YOLO) — only if audio passed
         # ──────────────────────────────────────────────────────────────────
         if audio_result.nsfw_confidence < NSFW_CONFIDENCE_THRESHOLD:
             vision_result = process_vision(video_path, temp_dir)
+            print(f"\n🔍 YOLO detected objects: {vision_result.detected_objects}\n")
 
             # Copy frames to a persistent temp dir for CLIP categorization
             frames_dir = os.path.join(temp_dir, "frames")
@@ -948,13 +1013,29 @@ def process_video_ai(self, video_id: int) -> str:
     # ──────────────────────────────────────────────────────────────────────
     # 6. Combined NSFW decision
     # ──────────────────────────────────────────────────────────────────────
-    # Noisy-OR across modalities
+    # 6a. Metadata NSFW — scan description + tags even when audio is silent
+    _meta_text_parts = [video.description or ""]
+    if isinstance(video.tags, list):
+        _meta_text_parts.append(" ".join(video.tags))
+    elif video.tags:
+        _meta_text_parts.append(str(video.tags))
+    _meta_text = " ".join(filter(None, _meta_text_parts))
+    meta_conf, meta_triggers = score_nsfw_text(_meta_text) if _meta_text else (0.0, [])
+    if meta_conf > 0:
+        logger.info(
+            "Metadata NSFW: confidence=%.2f, triggers=%s", meta_conf, meta_triggers
+        )
+
+    # Noisy-OR across all three modalities: audio transcript, vision, metadata text
     audio_conf = audio_result.nsfw_confidence
     vision_conf = vision_result.nsfw_confidence
-    combined_confidence = min(1.0, 1.0 - (1.0 - audio_conf) * (1.0 - vision_conf))
+    combined_confidence = min(
+        1.0,
+        1.0 - (1.0 - audio_conf) * (1.0 - vision_conf) * (1.0 - meta_conf),
+    )
 
     is_safe = combined_confidence < NSFW_CONFIDENCE_THRESHOLD
-    all_triggers = audio_result.nsfw_triggers + vision_result.nsfw_triggers
+    all_triggers = audio_result.nsfw_triggers + vision_result.nsfw_triggers + meta_triggers
 
     if not is_safe:
         safety_label = (
@@ -979,7 +1060,7 @@ def process_video_ai(self, video_id: int) -> str:
             filter(None, [audio_result.transcript, video.description, tags_text])
         )
 
-        category_name = detect_category_multi(
+        category_name, raw_fallback_term = detect_category_multi(
             text=combined_text,
             detected_objects=vision_result.detected_objects,
             frames=_frames_for_category,
@@ -995,8 +1076,14 @@ def process_video_ai(self, video_id: int) -> str:
 
         if category_name:
             logger.info("Category assigned: %s", category_name)
+        elif raw_fallback_term:
+            # Auto-create a new category from the raw detected term
+            category_name = raw_fallback_term
+            logger.info("Auto-creating new category from raw term: %s", category_name)
         else:
-            logger.info("No category matched for video %d", video_id)
+            # Absolute last resort — use "General"
+            category_name = "General"
+            logger.info("No signal found for video %d — assigning 'General'", video_id)
 
     # ──────────────────────────────────────────────────────────────────────
     # 8. Thumbnail generation
@@ -1039,9 +1126,14 @@ def process_video_ai(self, video_id: int) -> str:
 
         if is_safe:
             video.status = "ready"
-            if category_name:
-                cat, _ = Category.objects.get_or_create(name=category_name)
-                video.category = cat
+            # category_name is always set for safe videos (auto-created if needed)
+            cat, created = Category.objects.get_or_create(
+                name=category_name,
+                defaults={"is_active": True},
+            )
+            if created:
+                logger.info("New category created: '%s'", category_name)
+            video.category = cat
         else:
             video.status = "blocked"
 
@@ -1079,6 +1171,30 @@ def process_video_ai(self, video_id: int) -> str:
     # ──────────────────────────────────────────────────────────────────────
     if is_safe and video.status == "ready":
         _redis_add_trending(video.id)
+
+        # ── 10a. Mix custom audio track into the video file (if provided) ─
+        # NOTE: Server-side FFmpeg mixing is disabled — audio is handled
+        # entirely client-side (TikTok style). The fields audio_track_url,
+        # audio_trim_start, volume_music, volume_original are stored in the
+        # DB and sent to the frontend, which plays the track on top of the
+        # video using the Web Audio API / HTML Audio element.
+        #
+        # If server-side mixing is ever needed again, uncomment below:
+        #
+        # if video.audio_track_url and video.video:
+        #     try:
+        #         from .utils import mix_audio_into_video
+        #         mixed = mix_audio_into_video(
+        #             video_path=video.video.path,
+        #             audio_url=video.audio_track_url,
+        #             volume_original=video.volume_original,
+        #             volume_music=video.volume_music,
+        #             audio_trim_start=getattr(video, 'audio_trim_start', 0.0),
+        #         )
+        #         if not mixed:
+        #             logger.warning("Audio mixing failed for video %d", video.id)
+        #     except Exception as exc:
+        #         logger.warning("Audio mixing raised an exception for video %d: %s", video.id, exc)
 
     _redis_cache_result(video.id, ProcessingResult(
         is_safe=is_safe,
@@ -1163,3 +1279,420 @@ def _finalize_video(video, *, is_safe: bool, label: str) -> None:
 
     if not is_safe:
         _delete_blocked_video(video)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Generación IA — BytePlus Vision AI
+# ─────────────────────────────────────────────────────────────────────────────
+
+import base64 as _base64
+import uuid as _uuid
+
+logger_ai = get_task_logger(__name__)
+
+_STYLE_PROMPTS = {
+    "cinematic": "cinematic style, professional film quality, dramatic lighting, movie scene",
+    "anime":     "anime style, vibrant colors, Studio Ghibli inspired, Japanese animation",
+    "realistic": "photorealistic, high quality, 8k resolution, ultra detailed",
+    "artistic":  "artistic style, digital painting, creative visual, masterpiece",
+    "3d":        "3D render, high quality, tridimensional, CGI quality, Unreal Engine",
+    "retro":     "retro style, vintage aesthetic, nostalgic, film grain, 1980s",
+}
+
+
+def _build_xai_client():
+    """Devuelve un cliente OpenAI apuntando a la API de xAI (Grok Imagine)."""
+    from openai import OpenAI
+    api_key = getattr(settings, "XAI_API_KEY", "")
+    return OpenAI(api_key=api_key, base_url="https://api.x.ai/v1")
+
+
+def _download_and_save_media(url: str, mime_type: str = "image/jpeg") -> str:
+    """Descarga una URL externa, la guarda en MEDIA_ROOT y devuelve la ruta relativa /media/..."""
+    import requests as _requests
+    ext = mime_type.split("/")[-1].replace("jpeg", "jpg")
+    filename = f"ai_generated/{_uuid.uuid4().hex}.{ext}"
+    full_path = os.path.join(getattr(settings, "MEDIA_ROOT", "/tmp"), filename)
+    os.makedirs(os.path.dirname(full_path), exist_ok=True)
+    api_key = getattr(settings, "XAI_API_KEY", "")
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "User-Agent": "Mozilla/5.0",
+    }
+    resp = _requests.get(url, headers=headers, timeout=120, stream=True)
+    resp.raise_for_status()
+    with open(full_path, "wb") as fh:
+        for chunk in resp.iter_content(chunk_size=8192):
+            fh.write(chunk)
+    media_url = getattr(settings, "MEDIA_URL", "/media/").rstrip("/")
+    return f"{media_url}/{filename}"
+
+
+def _save_b64_media(b64_data: str, mime_type: str = "image/png") -> str:
+    ext = mime_type.split("/")[-1].replace("jpeg", "jpg")
+    filename = f"ai_generated/{_uuid.uuid4().hex}.{ext}"
+    full_path = os.path.join(getattr(settings, "MEDIA_ROOT", "/tmp"), filename)
+    os.makedirs(os.path.dirname(full_path), exist_ok=True)
+    with open(full_path, "wb") as fh:
+        fh.write(_base64.b64decode(b64_data))
+    return f"{getattr(settings, 'MEDIA_URL', '/media/')}{filename}"
+
+
+def _generate_image_xai(client, history_id, full_prompt, ref_b64, ref_mime):
+    """
+    Generación de imagen con Grok Imagine (xAI) — llamada síncrona.
+    Devuelve la URL pública o None si falla.
+    """
+    from .models import AIGenerationHistory
+    from django.conf import settings
+
+    logger_ai.info("Grok image submit — has_ref=%s", bool(ref_b64))
+
+    if getattr(settings, "AI_DRY_RUN", False):
+        logger_ai.info("🧪 DRY RUN — simulando imagen generada")
+        fake_url = "https://picsum.photos/seed/buzzy/512/512"
+        AIGenerationHistory.objects.filter(id=history_id).update(status="completed", media_url=fake_url)
+        logger_ai.info("✅ [DRY RUN] Imagen simulada — history_id=%s", history_id)
+        return fake_url
+    image_url = ""
+
+    if ref_b64:
+        # Con imagen de referencia: Image Editing endpoint
+        try:
+            import urllib.request, json as _json, ssl
+            api_key = client.api_key
+            body = _json.dumps({
+                "model": "grok-imagine-image-quality",
+                "prompt": full_prompt,
+                "image": {"url": f"data:{ref_mime};base64,{ref_b64}"},
+                "n": 1,
+                "response_format": "url",
+            }).encode("utf-8")
+            req = urllib.request.Request(
+                "https://api.x.ai/v1/images/edits",
+                data=body,
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                method="POST",
+            )
+            ctx = ssl.create_default_context()
+            try:
+                with urllib.request.urlopen(req, timeout=120, context=ctx) as resp:
+                    data = _json.loads(resp.read().decode("utf-8"))
+            except urllib.error.HTTPError as http_err:
+                err_body = http_err.read().decode("utf-8")
+                logger_ai.error("Grok image edit HTTP %s: %s", http_err.code, err_body)
+                raise
+            logger_ai.info("Grok image edit resp: %s", str(data)[:300])
+            image_url = data.get("data", [{}])[0].get("url", "")
+        except Exception as exc:
+            logger_ai.error("Grok image edit falló: %s", exc)
+            AIGenerationHistory.objects.filter(id=history_id).update(status="failed")
+            return None
+    else:
+        # Sin imagen de referencia: generación desde texto
+        try:
+            response = client.images.generate(
+                model="grok-imagine-image",
+                prompt=full_prompt,
+                n=1,
+                response_format="url",
+            )
+            logger_ai.info("Grok image generate resp: %s", str(response)[:300])
+            image_url = response.data[0].url or ""
+        except Exception as exc:
+            logger_ai.error("Grok image generate falló: %s", exc)
+            AIGenerationHistory.objects.filter(id=history_id).update(status="failed")
+            return None
+
+    if image_url:
+        try:
+            image_url = _download_and_save_media(image_url, "image/jpeg")
+            logger_ai.info("Imagen descargada localmente: %s", image_url)
+        except Exception as dl_exc:
+            logger_ai.error("No se pudo descargar imagen localmente: %s", dl_exc)
+            AIGenerationHistory.objects.filter(id=history_id).update(status="failed")
+            return None
+        AIGenerationHistory.objects.filter(id=history_id).update(
+            status="completed", media_url=image_url,
+        )
+        # Descontar crédito solo cuando la imagen se generó exitosamente
+        from .models import AIWallet, AIGenerationHistory as _H
+        _hist = _H.objects.filter(id=history_id).select_related('user').first()
+        if _hist:
+            AIWallet.get_or_create_for(_hist.user).consume_image()
+        logger_ai.info("✅ Imagen completada — history_id=%s url=%s", history_id, image_url)
+    else:
+        logger_ai.error("Grok image: no image_url en respuesta")
+        AIGenerationHistory.objects.filter(id=history_id).update(status="failed")
+
+    return image_url
+
+
+def _generate_video_xai(client, history_id, full_prompt, duration, ref_b64=None, ref_mime=None):
+    """
+    Generación de video con Grok Imagine (xAI) — submit asíncrono + polling.
+    Devuelve (video_url, generation_id) o (None, None) si falla en el submit.
+    """
+    from .models import AIGenerationHistory
+
+    logger_ai.info("Grok video submit — duration=%s has_ref=%s", duration, bool(ref_b64))
+
+    # from django.conf import settings
+    # if getattr(settings, "AI_DRY_RUN", False):
+    #     logger_ai.info("🧪 DRY RUN — simulando video generado")
+    #     fake_id = "dry-run-fake-id-12345"
+    #     AIGenerationHistory.objects.filter(id=history_id).update(byteplus_task_id=fake_id, status="processing")
+    #     return None, fake_id
+
+    try:
+        import urllib.request, json as _json, ssl
+        api_key = client.api_key
+        payload = {
+            "model": "grok-imagine-video",
+            "prompt": full_prompt,
+            "duration": 1,
+            "aspect_ratio": "16:9",
+            "resolution": "480p"
+        }
+        if ref_b64:
+            payload["image"] = {"url": f"data:{ref_mime};base64,{ref_b64}"}
+        body = _json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            "https://api.x.ai/v1/videos/generations",
+            data=body,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        ctx = ssl.create_default_context()
+        with urllib.request.urlopen(req, timeout=60, context=ctx) as resp:
+            data = _json.loads(resp.read().decode("utf-8"))
+        generation_id = data.get("id") or data.get("request_id") or data.get("generation_id")
+        logger_ai.info("Grok video job enviado — generation_id=%s resp=%s", generation_id, str(data)[:200])
+    except Exception as exc:
+        logger_ai.error("Grok video submit falló: %s", exc)
+        AIGenerationHistory.objects.filter(id=history_id).update(status="failed")
+        return None, None
+
+    AIGenerationHistory.objects.filter(id=history_id).update(
+        byteplus_task_id=generation_id,
+        status="processing",
+    )
+    return None, generation_id
+
+
+def _poll_video_xai(client, history_id, generation_id):
+    """
+    Consulta el estado de un video en generación con Grok Imagine.
+    Devuelve (status_str, video_url_or_None).
+    status_str: 'processing' | 'completed' | 'failed'
+    """
+    from django.conf import settings
+    if getattr(settings, "AI_DRY_RUN", False):
+        logger_ai.info("🧪 DRY RUN — simulando video completado")
+        return "completed", "https://www.w3schools.com/html/mov_bbb.mp4"
+
+    try:
+        import urllib.request, json as _json, ssl
+        api_key = client.api_key
+        req = urllib.request.Request(
+            f"https://api.x.ai/v1/videos/{generation_id}",
+            headers={"Authorization": f"Bearer {api_key}"},
+            method="GET",
+        )
+        ctx = ssl.create_default_context()
+        with urllib.request.urlopen(req, timeout=30, context=ctx) as resp:
+            data = _json.loads(resp.read().decode("utf-8"))
+        status = data.get("status", "processing")
+        logger_ai.info("Grok video poll — generation_id=%s status=%s resp=%s", generation_id, status, str(data)[:300])
+
+        if status == "done":
+            video_url = data.get("video", {}).get("url", "")
+            return "completed", video_url
+        elif status in ("failed", "cancelled", "error"):
+            return "failed", None
+        else:
+            return "processing", None
+    except Exception as exc:
+        logger_ai.warning("Grok video poll error: %s", exc)
+        return "processing", None
+
+
+@shared_task(
+    bind=True,
+    max_retries=36,
+    default_retry_delay=10,
+    acks_late=True,
+    reject_on_worker_lost=True,
+    time_limit=480,
+    soft_time_limit=450,
+)
+def generate_ai_media(
+    self,
+    history_id: int,
+    media_type: str,
+    style_slug: str,
+    duration: int = 6,
+    ref_image_path: str = None,
+    ref_mime: str = None,
+):
+    """
+    IMAGEN → Grok Imagine (xAI) images/generations (síncrono)
+    VIDEO  → Grok Imagine (xAI) videos/generations + polling con retries
+    """
+    from .models import AIGenerationHistory
+
+    try:
+        history = AIGenerationHistory.objects.get(id=history_id)
+    except AIGenerationHistory.DoesNotExist:
+        logger_ai.error("generate_ai_media: history %s no encontrado", history_id)
+        return
+
+    client         = _build_xai_client()
+    style_addition = _STYLE_PROMPTS.get(style_slug, "")
+
+    # Leer imagen de referencia desde disco y convertir a base64
+    ref_b64 = None
+    if ref_image_path:
+        try:
+            import base64 as _b64, os as _os
+            with open(ref_image_path, "rb") as f:
+                ref_b64 = _b64.b64encode(f.read()).decode("utf-8")
+            logger_ai.info("ref_b64 cargado desde disco — path=%s size=%d", ref_image_path, len(ref_b64))
+            # No borrar aquí — se borra después del submit exitoso para no perderlo en retries
+        except FileNotFoundError:
+            # Normal en retries de polling — el archivo ya fue borrado tras el submit
+            logger_ai.info("ref_image_path ya eliminado (retry de polling) — continuando sin ref")
+            ref_b64 = None
+        except Exception as exc:
+            logger_ai.error("Error leyendo ref_image_path=%s: %s", ref_image_path, exc)
+            ref_b64 = None
+
+    if ref_b64:
+        full_prompt = history.prompt or "Edit this image as described"
+    elif style_addition:
+        full_prompt = f"{history.prompt}, {style_addition}"
+    else:
+        full_prompt = history.prompt or "high quality image"
+
+    # ── IMAGEN: llamada síncrona, termina en esta ejecución ──────────────────
+    if media_type == "image":
+        _generate_image_xai(client, history_id, full_prompt, ref_b64, ref_mime)
+        return
+
+    # ── VIDEO: submit asíncrono + polling con retries ─────────────────────────
+    if not history.byteplus_task_id:
+        logger_ai.info(
+            "Grok video submit — has_ref=%s ref_len=%s",
+            bool(ref_b64), len(ref_b64) if ref_b64 else 0,
+        )
+        _, generation_id = _generate_video_xai(client, history_id, full_prompt, duration, ref_b64, ref_mime)
+        if not generation_id:
+            raise self.retry(countdown=10)
+        # Submit exitoso — borrar archivo temporal (ya tenemos ref_b64 en memoria para el retry no aplica)
+        if ref_image_path:
+            try:
+                import os as _os3
+                if _os3.path.exists(ref_image_path):
+                    _os3.unlink(ref_image_path)
+            except Exception:
+                pass
+        history.byteplus_task_id = generation_id
+
+    # ── Polling ───────────────────────────────────────────────────────────────
+    poll_status, video_url = _poll_video_xai(client, history_id, history.byteplus_task_id)
+
+    if poll_status == "processing":
+        raise self.retry(countdown=15)
+
+    if poll_status == "completed" and video_url:
+        try:
+            video_url = _download_and_save_media(video_url, "video/mp4")
+            logger_ai.info("Video descargado localmente: %s", video_url)
+        except Exception as dl_exc:
+            logger_ai.error("No se pudo descargar video localmente: %s", dl_exc)
+            AIGenerationHistory.objects.filter(id=history_id).update(status="failed")
+            return
+        AIGenerationHistory.objects.filter(id=history_id).update(
+            status="completed", media_url=video_url,
+        )
+        # Descontar créditos solo cuando el video se generó exitosamente
+        from .models import AIWallet, AIGenerationHistory as _H
+        _hist = _H.objects.filter(id=history_id).select_related('user').first()
+        if _hist:
+            AIWallet.get_or_create_for(_hist.user).consume_video(duration)
+        logger_ai.info("✅ Video completado — history_id=%s url=%s", history_id, video_url)
+    else:
+        logger_ai.error("❌ Grok video falló — status=%s", poll_status)
+        AIGenerationHistory.objects.filter(id=history_id).update(status="failed")
+
+
+@shared_task(bind=True, max_retries=0)
+def moderate_ai_media(self, video_id: int) -> str:
+    """
+    Modera y categoriza un Video generado por IA (imagen o video corto).
+    No requiere archivo físico — usa el prompt (description) para texto
+    y descarga la imagen para análisis CLIP si está disponible.
+    """
+    from .models import Video, Category
+
+    try:
+        video = Video.objects.get(id=video_id)
+    except Video.DoesNotExist:
+        return f"Video {video_id} not found"
+
+    if video.status != "active":
+        return f"Video {video_id} skipped (status={video.status})"
+
+    # 1. Moderación de texto — prompt del usuario
+    prompt_text = video.description or ""
+    text_conf, text_triggers = score_nsfw_text(prompt_text)
+    is_safe = text_conf < NSFW_CONFIDENCE_THRESHOLD
+
+    if not is_safe:
+        safety_label = f"NSFW en prompt (confianza={text_conf:.0%}): " + ", ".join(text_triggers[:5])
+        video.is_safe = False
+        video.safety_label = safety_label
+        video.status = "blocked"
+        video.save(update_fields=["is_safe", "safety_label", "status"])
+        logger.warning("AI media %d bloqueada — %s", video_id, safety_label)
+        return f"Video {video_id} blocked: {safety_label}"
+
+    # 2. Categorización desde el prompt
+    category_name, raw_fallback = detect_category_multi(
+        text=prompt_text,
+        detected_objects={},
+        frames=[],
+    )
+    if not category_name:
+        category_name = raw_fallback or "General"
+
+    cat, _ = Category.objects.get_or_create(name=category_name, defaults={"is_active": True})
+
+    video.is_safe = True
+    video.safety_label = "approved"
+    video.category = cat
+    video.save(update_fields=["is_safe", "safety_label", "category"])
+
+    logger.info("AI media %d — safe, category=%s", video_id, category_name)
+    return f"Video {video_id} moderated: category={category_name}"
+
+
+@shared_task(name='apps.videos.tasks.expire_unopened_gifts')
+def expire_unopened_gifts():
+    from django.utils import timezone
+    from datetime import timedelta
+    from apps.videos.models import UserGift, VideoGift, StoryGift
+
+    cutoff = timezone.now() - timedelta(days=30)
+
+    user_count, _ = UserGift.objects.filter(is_seen=False, created_at__lt=cutoff).delete()
+    video_count, _ = VideoGift.objects.filter(is_seen=False, created_at__lt=cutoff).delete()
+    story_count, _ = StoryGift.objects.filter(is_seen=False, created_at__lt=cutoff).delete()
+
+    logger.info(f'Gifts expirados: {user_count} de perfil, {video_count} de video, {story_count} de historia')
+    return f'Expirados: {user_count} perfil, {video_count} video, {story_count} historia'

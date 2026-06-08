@@ -1,23 +1,40 @@
 from django.utils import timezone
 import datetime
 from datetime import timedelta
+from django.conf import settings as django_settings
 from rest_framework import serializers
-from .models import Comment, Follower,AIGenerationHistory, GiftStory, Like, Story, StoryGift, StoryLike, StoryMedia, StoryView, Video, View, ChatRoom, Message, UserOnlineStatus, MessageReaction
-from apps.users.models import User
 
+
+def _abs_url(request, path):  # path: str | None
+    """Convert a relative media path to an absolute URL using the request or BACKEND_URL."""
+    if not path:
+        return None
+    if path.startswith("http"):
+        return path
+    if request:
+        return request.build_absolute_uri(path)
+    base = getattr(django_settings, "BACKEND_URL", "http://localhost:8000").rstrip("/")
+    return f"{base}{path}" if path.startswith("/") else f"{base}/{path}"
+from .models import AudioTrack, Comment, Follower, AIGenerationHistory, AIPackage, FavoriteTrack, GiftStory, Like, Story, StoryGift, StoryLike, StoryMedia, StoryView, Video, VideoGift, UserGift, View, ChatRoom, Message, UserOnlineStatus, MessageReaction, SavedVideo
+from apps.users.models import User
+from apps.subscriptions.models import UserSubscription
+from apps.subscriptions.serializers import UserSubscriptionSerializer
+        
 
 class UserSerializers(serializers.ModelSerializer):
-     profile_picture = serializers.ImageField(use_url=False)
-     subscription_status = serializers.SerializerMethodField()
+    profile_picture = serializers.SerializerMethodField(read_only=True)
+    subscription_status = serializers.SerializerMethodField()
 
-     class Meta:
+    class Meta:
         model = User
         fields = ("username", "email", 'profile_picture', 'id', 'subscription_status') 
 
-     def get_subscription_status(self, obj):
-        from apps.subscriptions.models import UserSubscription
-        from apps.subscriptions.serializers import UserSubscriptionSerializer
-        
+    def get_profile_picture(self, obj):
+        request = self.context.get('request')
+        return _abs_url(request, obj.profile_picture.url if obj.profile_picture else None)
+
+    def get_subscription_status(self, obj):
+ 
         request = self.context.get('request')
         if not request or not request.user.is_authenticated:
             return None
@@ -67,85 +84,72 @@ class LikeSerializers(serializers.ModelSerializer):
 class CommentSerializers(serializers.ModelSerializer):
     user_id = serializers.SerializerMethodField()
     parent_uuid = serializers.UUIDField(write_only=True, required=False, allow_null=True)
+    audio_file = serializers.FileField(required=False, allow_null=True)
+    audio_url = serializers.SerializerMethodField()
+    image_file = serializers.ImageField(required=False, allow_null=True)
+    image_url = serializers.SerializerMethodField()
 
     class Meta:
         model = Comment
-        fields = [ 'uuid','video_id', 'content', 'user_id', 'created_at', 'parent', 'is_priority_comment', 'priority_plan_name']
+        fields = (
+            "uuid", "video_id", "content", "user_id", "created_at",
+            "parent_uuid", "is_priority_comment", "priority_plan_name",
+            "audio_file", "audio_url", "audio_duration",
+            "image_file", "image_url",
+        )
         extra_kwargs = {
             "user_id": {"required": False},
             "parent": {"required": False},
+            "content": {"required": False},
         }
 
     def get_user_id(self, obj):
-        # We pass the video owner as context to the user serializer
-        # so it can check the 1-to-1 subscription for premium status in comments
         context = self.context.copy()
         context['subscribed_to_user'] = obj.video_id.user_id
         return UserSerializers(obj.user_id, context=context).data
 
-    # def create(self, validated_data):
-    #     # Sacamos el parent_uuid que viene del request
-    #     parent_uuid = validated_data.pop("parent_uuid", None)
+    def get_audio_url(self, obj):
+        request = self.context.get('request')
+        return _abs_url(request, obj.audio_file.url if obj.audio_file else None)
 
-    #     parent = None
-    #     if parent_uuid:
-    #         parent = Comment.objects.filter(uuid=parent_uuid).first()
-
-    #     # No duplicamos `parent`
-    #     return Comment.objects.create(
-    #         parent=parent,
-    #         **validated_data
-    #     )
-
-    user_id = serializers.SerializerMethodField()
-    parent_uuid = serializers.UUIDField(write_only=True, required=False, allow_null=True)
-    class Meta:
-        model = Comment
-        fields = ("video_id", "content", "user_id", "uuid", "created_at", "parent_uuid", "is_priority_comment", "priority_plan_name")
-        extra_kwargs = {
-            "user": {"required": False},
-            "parent": {"required": False},
-        }
-
-    def create(self, validated_data):
-        # Sacamos parent del validated_data por si vino del request
-        parent = validated_data.pop("parent", None)
-
-        # Creamos el comentario correctamente
-        return Comment.objects.create(parent=parent, **validated_data)
-    
-    # def get_event(self, obj):
-    #     return ""
-    
-
-
-    class Meta:
-        model = Comment
-        fields = ['uuid', 'video_id', 'content', 'user_id', 'created_at', 'parent_uuid', 'is_priority_comment', 'priority_plan_name']
+    def get_image_url(self, obj):
+        request = self.context.get('request')
+        return _abs_url(request, obj.image_file.url if obj.image_file else None)
 
     def create(self, validated_data):
         parent_uuid = validated_data.pop("parent_uuid", None)
-
         parent = None
         if parent_uuid:
             try:
                 parent = Comment.objects.get(uuid=parent_uuid)
             except Comment.DoesNotExist:
-                parent = None
-
+                pass
         return Comment.objects.create(parent=parent, **validated_data)
 class ListCommentsZerializers(serializers.ModelSerializer):
     user_id = serializers.SerializerMethodField()
     parent = CommentSerializers(read_only=True)
+    audio_url = serializers.SerializerMethodField()
+    image_url = serializers.SerializerMethodField()
+
     class Meta:
         model = Comment
-        fields = [ 'uuid','video_id', 'content', 'user_id', 'created_at', 'parent', 'is_priority_comment', 'priority_plan_name']
-    
+        fields = ['uuid', 'video_id', 'content', 'user_id', 'created_at', 'parent',
+                  'is_priority_comment', 'priority_plan_name', 'audio_url', 'audio_duration',
+                  'image_url']
+
     def get_user_id(self, obj):
         context = self.context.copy()
         context['subscribed_to_user'] = obj.video_id.user_id
         return UserSerializers(obj.user_id, context=context).data
-        
+
+    def get_audio_url(self, obj):
+        request = self.context.get('request')
+        return _abs_url(request, obj.audio_file.url if obj.audio_file else None)
+
+    def get_image_url(self, obj):
+        request = self.context.get('request')
+        return _abs_url(request, obj.image_file.url if obj.image_file else None)
+
 class ViewSerializers(serializers.ModelSerializer):
     class Meta:
         model = View
@@ -158,16 +162,47 @@ class VideoZerializer(serializers.ModelSerializer):
     view_acount = serializers.SerializerMethodField()
     liked = serializers.SerializerMethodField()
     current_user_followered = serializers.SerializerMethodField()
+    is_saved = serializers.SerializerMethodField()
+    video_url = serializers.SerializerMethodField()
+    thumbnail_url = serializers.SerializerMethodField()
+    audio_track_url = serializers.SerializerMethodField()
+    audio_track_cover = serializers.SerializerMethodField()
+
     class Meta:
         model = Video
-        fields = ("id","category", "created_at","tags",  "description", "duration","thumbnail_url", "user_id", "video_url", "video", "like_count", "comments_count", "view_acount", "liked", "current_user_followered", "uuid", "media_type") 
+        fields = (
+            "id", "category", "created_at", "tags", "description", "duration",
+            "thumbnail_url", "user_id", "video_url", "video", "like_count",
+            "comments_count", "view_acount", "liked", "current_user_followered",
+            "uuid", "media_type", "status",
+            "audio_track_url", "audio_track_id", "audio_track_title",
+            "audio_track_artist", "audio_track_cover", "volume_original",
+            "volume_music", "audio_trim_start", "audio_trim_end",
+            "privacy", "is_saved",
+        )
+
+    def get_video_url(self, obj):
+        request = self.context.get('request')
+        return _abs_url(request, obj.video_url or (obj.video.url if obj.video else None))
+
+    def get_thumbnail_url(self, obj):
+        request = self.context.get('request')
+        return _abs_url(request, obj.thumbnail_url)
+
+    def get_audio_track_url(self, obj):
+        request = self.context.get('request')
+        return _abs_url(request, obj.audio_track_url)
+
+    def get_audio_track_cover(self, obj):
+        request = self.context.get('request')
+        return _abs_url(request, obj.audio_track_cover)
 
     def get_like_count(self, obj):
         return obj.get_count_like()
-    
+
     def get_comments_count(self, obj):
         return obj.get_count_comment()
-    
+
     def get_view_acount(self, obj):
         return obj.get_count_view()
 
@@ -181,6 +216,12 @@ class VideoZerializer(serializers.ModelSerializer):
         user = self.context.get('request').user
         if user.is_authenticated:
             return Follower.objects.filter(follower_user_id=obj.user_id, user_id=user).exists()
+        return False
+
+    def get_is_saved(self, obj):
+        user = self.context.get('request').user
+        if user.is_authenticated:
+            return SavedVideo.objects.filter(video=obj, user=user).exists()
         return False
     
 class FollowerSerializer(serializers.ModelSerializer):
@@ -219,10 +260,15 @@ class FollowerListSerializer(serializers.ModelSerializer):
         return Follower.objects.filter(user_id=request.user, follower_user_id=target_user).exists()
 
 class StoryMediaSerializer(serializers.ModelSerializer):
-    file = serializers.ImageField(use_url=False)
+    file = serializers.SerializerMethodField()
+
     class Meta:
         model = StoryMedia
-        fields = ['id', 'file', 'type', 'order']
+        fields = ['id', 'file', 'type', 'order', 'story']
+
+    def get_file(self, obj):
+        request = self.context.get('request')
+        return _abs_url(request, obj.file.url if obj.file else None)
 
 class GiftStorySerializer(serializers.ModelSerializer):
     # user_liked = serializers.SerializerMethodField()
@@ -242,9 +288,78 @@ class GetGiftStorySerializer(serializers.ModelSerializer):
         fields = ("id", "user", "story", "gift", "gift_type", "sender", "quantity", "created_at","is_active")
 
 class GiftRecivedSerializer(serializers.ModelSerializer):
+    sender_username = serializers.CharField(source='sender.username', read_only=True)
+    gift_video_url = serializers.SerializerMethodField()
+    gift_type = serializers.CharField(source='gift.emoji', read_only=True)
+    video_thumbnail = serializers.SerializerMethodField()
+
+    def get_gift_video_url(self, obj):
+        request = self.context.get('request')
+        if obj.gift and obj.gift.video:
+            return _abs_url(request, obj.gift.video.url)
+        return None
+
+    def get_video_thumbnail(self, obj):
+        request = self.context.get('request')
+        if obj.gift and obj.gift.thumbnail:
+            return _abs_url(request, obj.gift.thumbnail.url)
+        return None
+
     class Meta:
         model = StoryGift
         fields = "__all__"
+
+class VideoGiftReceivedSerializer(serializers.ModelSerializer):
+    sender_username = serializers.CharField(source='sender.username', read_only=True)
+    sender_avatar = serializers.CharField(source='sender.profile_picture', read_only=True)
+    gift_name = serializers.CharField(source='gift.name', read_only=True)
+    gift_emoji = serializers.CharField(source='gift.emoji', read_only=True)
+    gift_video_url = serializers.SerializerMethodField()
+    gift_color = serializers.CharField(source='gift.color_premiun', read_only=True)
+    video_thumbnail = serializers.SerializerMethodField()
+
+    def get_gift_video_url(self, obj):
+        request = self.context.get('request')
+        if obj.gift.video:
+            return _abs_url(request, obj.gift.video.url)
+        return None
+
+    def get_video_thumbnail(self, obj):
+        request = self.context.get('request')
+        return _abs_url(request, obj.video.thumbnail_url if obj.video else None)
+
+    class Meta:
+        model = VideoGift
+        fields = ['uuid', 'sender_username', 'sender_avatar', 'gift_name', 'gift_emoji',
+                  'gift_video_url', 'gift_color', 'video_thumbnail', 'created_at', 'is_seen', 'quantity', 'vip_message']
+
+
+class UserGiftReceivedSerializer(serializers.ModelSerializer):
+    sender_username = serializers.CharField(source='sender.username', read_only=True)
+    sender_avatar = serializers.CharField(source='sender.profile_picture', read_only=True)
+    gift_name = serializers.CharField(source='gift.name', read_only=True)
+    gift_emoji = serializers.CharField(source='gift.emoji', read_only=True)
+    gift_color = serializers.CharField(source='gift.color_premiun', read_only=True)
+    gift_video_url = serializers.SerializerMethodField()
+    video_thumbnail = serializers.SerializerMethodField()
+
+    def get_gift_video_url(self, obj):
+        request = self.context.get('request')
+        if obj.gift.video:
+            return _abs_url(request, obj.gift.video.url)
+        return None
+
+    def get_video_thumbnail(self, obj):
+        request = self.context.get('request')
+        if obj.gift.thumbnail:
+            return _abs_url(request, obj.gift.thumbnail.url)
+        return None
+
+    class Meta:
+        model = UserGift
+        fields = ['uuid', 'sender_username', 'sender_avatar', 'gift_name', 'gift_emoji',
+                  'gift_video_url', 'gift_color', 'video_thumbnail', 'created_at', 'is_seen', 'quantity', 'vip_message']
+
 
 class StorySerializer(serializers.ModelSerializer):
     media = StoryMediaSerializer(many=True, read_only=True)
@@ -295,9 +410,11 @@ class StoryLikeSerializer(serializers.ModelSerializer):
 
 class MessageSerializer(serializers.ModelSerializer):
     sender_username = serializers.CharField(source='sender.username', read_only=True)
+    sender_id = serializers.IntegerField(source='sender.id', read_only=True)
     sender_avatar = serializers.CharField(source='sender.profile_picture', read_only=True)
     sender_subscription_status = serializers.SerializerMethodField()
     reactions = serializers.SerializerMethodField()
+    forwarded_from_username = serializers.CharField(source='forwarded_from.username', read_only=True, allow_null=True)
 
     def get_sender_subscription_status(self, obj):
         from apps.subscriptions.models import UserSubscription
@@ -331,17 +448,25 @@ class MessageSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Message
-        fields = ['uuid', 'content', 'sender_username', 'sender_avatar', 'created_at', 'message_type', 'file', 'reactions', 'sender_subscription_status']
+        fields = ['uuid', 'content', 'sender_username', 'sender_id', 'sender_avatar', 'created_at', 'message_type', 'file', 'reactions', 'sender_subscription_status', 'story_uuid', 'story_media_url', 'story_audio_url', 'deleted_for_all', 'is_read', 'forwarded_from_username', 'is_edited']
 
 class ChatRoomSerializer(serializers.ModelSerializer):
     other_user = serializers.SerializerMethodField()
     last_message = serializers.SerializerMethodField()
     unread_count = serializers.SerializerMethodField()
     other_user_online = serializers.SerializerMethodField()
-    
+    folder_type = serializers.SerializerMethodField()
+
     class Meta:
         model = ChatRoom
-        fields = ['uuid', 'other_user', 'last_message', 'unread_count', 'updated_at', 'other_user_online']
+        fields = ['uuid', 'other_user', 'last_message', 'unread_count', 'updated_at', 'other_user_online', 'folder_type']
+
+    def get_folder_type(self, obj):
+        """Devuelve el folder personal del viewer, no el del otro participante."""
+        request = self.context.get('request')
+        if not request:
+            return obj.folder_type_p1
+        return obj.get_folder_for(request.user)
     
     def get_other_user(self, obj):
         user = self.context['request'].user
@@ -350,8 +475,8 @@ class ChatRoomSerializer(serializers.ModelSerializer):
             'id': other.id,
             'username': other.username,
             'name': other.first_name + ' ' + other.last_name,
-            'avatar': other.profile_picture.url if other.profile_picture else None,
-            'profile_video': other.profile_video.url if other.profile_video else None,
+            'avatar': _abs_url(self.context.get('request'), other.profile_picture.url if other.profile_picture else None),
+            'profile_video': _abs_url(self.context.get('request'), other.profile_video.url if other.profile_video else None),
             'subscription_status': self.get_subscription_status(other),
         }
     
@@ -387,7 +512,26 @@ class ChatRoomSerializer(serializers.ModelSerializer):
     
     def get_last_message(self, obj):
         last_msg = obj.messages.last()
-        return last_msg.content[:50] + '...' if last_msg else None
+        if not last_msg:
+            return None
+        msg_type = getattr(last_msg, 'message_type', 'text')
+        if msg_type == 'contact':
+            try:
+                import json
+                contact = json.loads(last_msg.content)
+                return f"Contacto: @{contact.get('username', '')}"
+            except Exception:
+                return "Contacto compartido"
+        if msg_type == 'voice':
+            return "🎤 Audio"
+        if msg_type in ('image',):
+            return "📷 Imagen"
+        if msg_type == 'video':
+            return "🎥 Video"
+        if msg_type in ('document', 'file'):
+            return "📄 Documento"
+        content = last_msg.content or ""
+        return (content[:50] + '...') if len(content) > 50 else content
     
     def get_unread_count(self, obj):
         user = self.context['request'].user
@@ -429,3 +573,67 @@ class AIGenerationHistorySerializer(serializers.ModelSerializer):
     class Meta:
         model = AIGenerationHistory
         fields = ['id', 'prompt', 'media_url', 'media_type', 'style_name', 'created_at']
+
+
+class AIPackageSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = AIPackage
+        fields = ['id', 'name', 'description', 'videos_count', 'images_count', 'price', 'is_featured', 'order']
+
+
+class NotificationSerializer(serializers.ModelSerializer):
+    actor = serializers.SerializerMethodField()
+    video_thumbnail = serializers.SerializerMethodField()
+    video_uuid = serializers.SerializerMethodField()
+
+    class Meta:
+        from .models import Notification
+        model = Notification
+        fields = [
+            'id', 'notification_type', 'message', 'is_read', 'read_at',
+            'created_at', 'actor', 'video_thumbnail', 'video_uuid',
+        ]
+
+    def get_actor(self, obj):
+        if not obj.actor:
+            return None
+        return {
+            'id': obj.actor.id,
+            'username': obj.actor.username,
+            'profile_picture': _abs_url(self.context.get('request'), obj.actor.profile_picture.url if obj.actor.profile_picture else None),
+        }
+
+    def get_video_thumbnail(self, obj):
+        request = self.context.get('request')
+        return _abs_url(request, obj.video.thumbnail_url if obj.video else None)
+
+    def get_video_uuid(self, obj):
+        if obj.video:
+            return str(obj.video.uuid)
+        return None
+
+
+class AudioTrackSerializer(serializers.ModelSerializer):
+    cover_url = serializers.SerializerMethodField()
+    audio_url = serializers.SerializerMethodField()
+    duration  = serializers.CharField(source='duration_display', read_only=True)
+
+    class Meta:
+        model  = AudioTrack
+        fields = ('id', 'title', 'artist', 'cover_url', 'audio_url', 'duration', 'duration_secs', 'category')
+
+    def get_cover_url(self, obj):
+        request = self.context.get('request')
+        return _abs_url(request, obj.cover.url if obj.cover else None)
+
+    def get_audio_url(self, obj):
+        request = self.context.get('request')
+        return _abs_url(request, obj.audio_file.url if obj.audio_file else None)
+
+
+class FavoriteTrackSerializer(serializers.ModelSerializer):
+    track = AudioTrackSerializer(read_only=True)
+
+    class Meta:
+        model  = FavoriteTrack
+        fields = ('id', 'track', 'created_at')

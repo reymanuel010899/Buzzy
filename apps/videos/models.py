@@ -1,12 +1,12 @@
 import uuid
+import os
 from django.dispatch import receiver
-from django.db.models.signals import post_save
+from django.db.models.signals import post_save, post_delete
 from django.utils import timezone
 from datetime import timedelta
 from django.db import models
 from apps.users.models import User
 from django.utils.text import slugify
-from django.contrib.postgres import indexes 
 
 def full_uuid():
     return str(uuid.uuid4()).replace("-", "")
@@ -20,6 +20,12 @@ class ChatRoom(models.Model):
     """
     Sala de chat 1:1 entre dos usuarios (estilo WhatsApp/IG)
     """
+    class FolderType(models.TextChoices):
+        STANDARD = 'standard', 'Amigos'
+        KNOWN = 'known', 'Conocidos'
+        REQUEST = 'request', 'Solicitudes'
+        HIDDEN = 'hidden', 'Ocultos'
+
     uuid = models.CharField(max_length=8, default=chat_uuid, unique=True, db_index=True)
     participant1 = models.ForeignKey(User, on_delete=models.CASCADE, related_name='chat_rooms_as_p1')
     participant2 = models.ForeignKey(User, on_delete=models.CASCADE, related_name='chat_rooms_as_p2')
@@ -39,6 +45,17 @@ class ChatRoom(models.Model):
     last_message_time = models.DateTimeField(null=True, blank=True)
     unread_count_p1 = models.PositiveIntegerField(default=0)
     unread_count_p2 = models.PositiveIntegerField(default=0)
+    # Cada participante tiene su propio folder — independiente del otro
+    folder_type_p1 = models.CharField(
+        max_length=20,
+        choices=FolderType.choices,
+        default=FolderType.STANDARD,
+    )
+    folder_type_p2 = models.CharField(
+        max_length=20,
+        choices=FolderType.choices,
+        default=FolderType.STANDARD,
+    )
 
     class Meta:
         unique_together = ('participant1', 'participant2')
@@ -56,7 +73,20 @@ class ChatRoom(models.Model):
     def get_other_participant(self, user):
         """Retorna el otro participante (no el usuario actual)"""
         return self.participant1 if user == self.participant2 else self.participant2
-    
+
+    def get_folder_for(self, user) -> str:
+        """Retorna el folder_type personal del user en este chat."""
+        if user == self.participant1:
+            return self.folder_type_p1
+        return self.folder_type_p2
+
+    def set_folder_for(self, user, folder: str):
+        """Guarda el folder_type personal del user sin hacer save()."""
+        if user == self.participant1:
+            self.folder_type_p1 = folder
+        else:
+            self.folder_type_p2 = folder
+
     def reset_unread_count(self, user):
         """Reset contadores de no leídos para un usuario"""
         if user == self.participant1:
@@ -88,12 +118,20 @@ class Message(models.Model):
             ('poll', 'Encuesta'),
             ('event', 'Evento'),
             ('sticker', 'Sticker'),
+            ('story_reply', 'Respuesta a historia'),
         ],
         default='text'
     )
     file = models.FileField(upload_to='chats/media/%Y/%m/%d/', blank=True, null=True)
+    story_uuid = models.CharField(max_length=50, blank=True, null=True)
+    story_media_url = models.TextField(blank=True, null=True)
+    story_audio_url = models.TextField(blank=True, null=True)
     is_deleted = models.BooleanField(default=False)
     deleted_for_all = models.BooleanField(default=False)  # "Eliminar para todos"
+    is_read = models.BooleanField(default=False)
+    read_at = models.DateTimeField(null=True, blank=True)
+    forwarded_from = models.ForeignKey('self', null=True, blank=True, on_delete=models.SET_NULL, related_name='forwards')
+    is_edited = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -216,6 +254,18 @@ class Story(models.Model):
     
     text = models.TextField(blank=True, null=True)
     is_active = models.BooleanField(default=True)  
+
+    audio_track_url   = models.URLField(max_length=500, blank=True, null=True)
+    audio_track_title = models.CharField(max_length=255, blank=True, null=True)
+    audio_track_artist= models.CharField(max_length=255, blank=True, null=True)
+    audio_volume_music= models.FloatField(default=0.8)
+    audio_trim_start  = models.FloatField(default=0.0)
+    audio_trim_end    = models.FloatField(blank=True, null=True)
+    filter_css        = models.CharField(max_length=500, blank=True, null=True)
+    text_layers       = models.JSONField(default=list, blank=True)
+    sticker_layers    = models.JSONField(default=list, blank=True)
+    location          = models.CharField(max_length=255, blank=True, null=True)
+
     created_at = models.DateTimeField(auto_now_add=True)
 
     def has_expired(self):
@@ -223,8 +273,7 @@ class Story(models.Model):
 
     def mark_expired(self):
         if self.has_expired() and self.is_active:
-            self.is_active = False
-            self.save()
+            self.delete()
 
     def total_views(self):
         return self.story_views.count()
@@ -277,21 +326,56 @@ class StoryLike(models.Model):
     def is_liked(cls, story, user):
         return cls.objects.filter(story=story, user=user).exists()
 
+
+class StoryReport(models.Model):
+    REASON_CHOICES = [
+        ("spam", "Spam"),
+        ("violence", "Contenido violento"),
+        ("nudity", "Desnudez o contenido sexual"),
+        ("hate", "Discurso de odio"),
+        ("other", "Otro"),
+    ]
+
+    STATUS_CHOICES = [
+        ("pending", "Pendiente"),
+        ("reviewed", "Revisado"),
+        ("dismissed", "Descartado"),
+    ]
+
+    story = models.ForeignKey(Story, on_delete=models.CASCADE, related_name="reports")
+    reported_by = models.ForeignKey(User, on_delete=models.CASCADE, related_name="story_reports")
+    reason = models.CharField(max_length=20, choices=REASON_CHOICES)
+    description = models.TextField(blank=True, null=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="pending")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ("story", "reported_by")
+
+    def __str__(self):
+        return f"{self.reported_by.username} reportó Story {self.story.id} - {self.reason}"
+
     def unlike(self):
         self.delete()
 
 class GiftStory(models.Model):
-    name = models.CharField(max_length=100) 
-    slug = models.SlugField(unique=True)     
+    name = models.CharField(max_length=100)
+    slug = models.SlugField(unique=True)
     emoji = models.CharField(max_length=100, blank=True, null=True)
     color_premiun = models.CharField(max_length=100, blank=True, null=True)
     video = models.FileField(
         upload_to=gift_upload_path,
         help_text="Video MP4 con fondo transparente si es posible"
     )
+    thumbnail = models.ImageField(
+        upload_to='gifts/thumbnails/',
+        blank=True, null=True,
+        help_text="Frame extraído del video del regalo"
+    )
 
     token_price = models.PositiveIntegerField(default=1)
     is_active = models.BooleanField(default=True)
+    is_premium_exclusive = models.BooleanField(default=False, help_text="Solo usuarios Buzzy Premium pueden enviar/recibir este regalo")
 
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -308,7 +392,9 @@ class StoryGift(models.Model):
     quantity = models.PositiveIntegerField(default=1)
     created_at = models.DateTimeField(auto_now_add=True)
     is_active = models.BooleanField(default=True)
-    
+    is_seen = models.BooleanField(default=False)
+    vip_message = models.TextField(blank=True, default="")
+
     def total_tokens(self):
         return self.gift.token_price * self.quantity
 
@@ -326,6 +412,8 @@ class VideoGift(models.Model):
     quantity = models.PositiveIntegerField(default=1)
     created_at = models.DateTimeField(auto_now_add=True)
     is_active = models.BooleanField(default=True)
+    is_seen = models.BooleanField(default=False)
+    vip_message = models.TextField(blank=True, default="")
 
     def total_tokens(self):
         return self.gift.token_price * self.quantity
@@ -335,12 +423,40 @@ class VideoGift(models.Model):
 
     
 
+class UserGift(models.Model):
+    uuid = models.CharField(max_length=32, default=full_uuid, unique=True, blank=True)
+    recipient = models.ForeignKey(User, on_delete=models.CASCADE, related_name='received_user_gifts')
+    sender = models.ForeignKey(User, on_delete=models.CASCADE, related_name='sent_user_gifts')
+    gift = models.ForeignKey(GiftStory, on_delete=models.CASCADE, related_name='user_sent_gifts')
+    gift_type = models.CharField(max_length=20)
+    quantity = models.PositiveIntegerField(default=1)
+    created_at = models.DateTimeField(auto_now_add=True)
+    is_active = models.BooleanField(default=True)
+    is_seen = models.BooleanField(default=False)
+    vip_message = models.TextField(blank=True, default="")
+
+    def total_tokens(self):
+        return self.gift.token_price * self.quantity
+
+    def __str__(self):
+        return f"{self.sender} sent {self.gift.name} to {self.recipient.username}"
+
+
 class Video(models.Model):
     STATUS_CHOICES = [
         ('pending', 'Pending Upload'),
         ('processing', 'AI Processing'),
         ('ready', 'Ready for Feed'),
         ('blocked', 'Blocked (Unsafe)'),
+    ]
+
+    PRIVACY_PUBLIC    = 'public'
+    PRIVACY_FOLLOWERS = 'followers'
+    PRIVACY_PRIVATE   = 'private'
+    PRIVACY_CHOICES = [
+        (PRIVACY_PUBLIC,    'Público'),
+        (PRIVACY_FOLLOWERS, 'Solo seguidores'),
+        (PRIVACY_PRIVATE,   'Privado'),
     ]
 
     uuid = models.CharField(max_length=32, default=full_uuid, unique=True, blank=True)
@@ -361,6 +477,24 @@ class Video(models.Model):
     is_safe = models.BooleanField(default=False)
     safety_label = models.CharField(max_length=255, blank=True, null=True)
     transcript = models.TextField(blank=True, null=True)
+
+    # ── Audio mixing ──────────────────────────────────────────────
+    audio_track_url   = models.URLField(max_length=500, blank=True, null=True)
+    volume_original   = models.FloatField(default=1.0)
+    volume_music      = models.FloatField(default=0.8)
+    audio_track_id    = models.CharField(max_length=64, blank=True, null=True)
+    audio_track_title = models.CharField(max_length=255, blank=True, null=True)
+    audio_track_artist= models.CharField(max_length=255, blank=True, null=True)
+    audio_track_cover = models.URLField(max_length=500, blank=True, null=True)
+    audio_trim_start  = models.FloatField(default=0.0)
+    audio_trim_end    = models.FloatField(blank=True, null=True)
+
+    privacy = models.CharField(
+        max_length=10,
+        choices=PRIVACY_CHOICES,
+        default=PRIVACY_PUBLIC,
+        db_index=True,
+    )
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -401,7 +535,10 @@ class Comment(models.Model):
 
     video_id = models.ForeignKey(Video, on_delete=models.CASCADE, related_name='comernt_video_reverce')
     user_id = models.ForeignKey(User, on_delete=models.CASCADE)
-    content = models.TextField()
+    content = models.TextField(blank=True, default='')
+    audio_file = models.FileField(upload_to='comments/audio/', null=True, blank=True)
+    audio_duration = models.FloatField(null=True, blank=True)
+    image_file = models.ImageField(upload_to='comments/images/', null=True, blank=True)
     is_priority_comment = models.BooleanField(default=False)
     priority_plan_name = models.CharField(max_length=20, choices=PRIORITY_PLAN_CHOICES, null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -425,15 +562,28 @@ class View(models.Model):
     def __str__(self):
         return f"View {self.id} - Video {self.video_id.id}"
 
+class SavedVideo(models.Model):
+    user     = models.ForeignKey(User, on_delete=models.CASCADE, related_name='saved_videos')
+    video    = models.ForeignKey(Video, on_delete=models.CASCADE, related_name='saved_by')
+    saved_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ('user', 'video')
+        ordering = ['-saved_at']
+
+    def __str__(self):
+        return f"{self.user.username} saved video {self.video_id}"
+
 class VideoStats(models.Model):
     """
     Aggregate engagement counters per video.
     All increments must use F() expressions to be atomic (race-condition safe).
     """
     video = models.OneToOneField(Video, on_delete=models.CASCADE, related_name='stats')
-    starts = models.PositiveIntegerField(default=0)        # video_start events
-    engagements = models.PositiveIntegerField(default=0)   # video_engagement events (3 s mark)
-    valid_views = models.PositiveIntegerField(default=0)   # video_view_valid events (30 % mark)
+    starts = models.PositiveIntegerField(default=0)             # video_start events
+    engagements = models.PositiveIntegerField(default=0)        # video_engagement events (3 s mark)
+    valid_views = models.PositiveIntegerField(default=0)        # video_view_valid events (50 % mark)
+    monetizable_views = models.PositiveIntegerField(default=0)  # video_view_monetizable (50% >= 10 s)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
@@ -453,14 +603,41 @@ class Follower(models.Model):
     
 
 class Notification(models.Model):
-    user_id = models.ForeignKey(User, on_delete=models.CASCADE) 
-    type = models.CharField(max_length=50) 
-    message = models.TextField() 
-    read_status = models.BooleanField(default=False)  
-    created_at = models.DateTimeField(auto_now_add=True)
+    class Type(models.TextChoices):
+        FOLLOW       = 'follow',        'Follow'
+        LIKE         = 'like',          'Like'
+        COMMENT      = 'comment',       'Comment'
+        COMMENT_REPLY = 'comment_reply','Comment Reply'
+        PROFILE_VISIT = 'profile_visit','Profile Visit'
+        STORY_LIKE   = 'story_like',    'Story Like'
+        GIFT         = 'gift',          'Gift'
+        MENTION      = 'mention',       'Mention'
+        EARNING      = 'earning',       'Earning'
+        WELCOME      = 'welcome',       'Welcome'
+
+    # Recipient
+    recipient   = models.ForeignKey(User, on_delete=models.CASCADE, related_name='notifications')
+    # Who triggered the notification
+    actor       = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='sent_notifications')
+    notification_type = models.CharField(max_length=50, choices=Type.choices, default=Type.FOLLOW)
+    # Optional references
+    video       = models.ForeignKey('Video',   on_delete=models.CASCADE, null=True, blank=True, related_name='notifications')
+    comment     = models.ForeignKey('Comment', on_delete=models.CASCADE, null=True, blank=True, related_name='notifications')
+    # Humanised text (optional override, generated on save if blank)
+    message     = models.TextField(blank=True)
+    is_read     = models.BooleanField(default=False, db_index=True)
+    read_at     = models.DateTimeField(null=True, blank=True)
+    created_at  = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['recipient', 'is_read']),
+            models.Index(fields=['recipient', 'created_at']),
+        ]
 
     def __str__(self):
-        return f"Notificación {self.id} - {self.type}"
+        return f"Notif({self.notification_type}) → {self.recipient_id}"
     
 class Hashtag(models.Model):
     name = models.CharField(max_length=100, unique=True) 
@@ -537,12 +714,21 @@ class AITemplate(models.Model):
         return f"{self.title} ({self.style.name})"
 
 class AIGenerationHistory(models.Model):
-    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='ai_history')
-    prompt = models.TextField()
-    media_url = models.URLField(max_length=500)
-    media_type = models.CharField(max_length=20, choices=[('image', 'Image'), ('video', 'Video')], default='image')
-    style = models.ForeignKey(AIStyle, on_delete=models.SET_NULL, null=True, blank=True)
-    created_at = models.DateTimeField(auto_now_add=True)
+    STATUS_CHOICES = [
+        ('pending',    'Pendiente'),
+        ('processing', 'Procesando'),
+        ('completed',  'Completado'),
+        ('failed',     'Fallido'),
+    ]
+
+    user            = models.ForeignKey(User, on_delete=models.CASCADE, related_name='ai_history')
+    prompt          = models.TextField()
+    media_url       = models.URLField(max_length=500, blank=True, default='')
+    media_type      = models.CharField(max_length=20, choices=[('image', 'Image'), ('video', 'Video')], default='image')
+    style           = models.ForeignKey(AIStyle, on_delete=models.SET_NULL, null=True, blank=True)
+    status          = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
+    byteplus_task_id = models.CharField(max_length=255, blank=True, default='')
+    created_at      = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         ordering = ['-created_at']
@@ -551,3 +737,204 @@ class AIGenerationHistory(models.Model):
 
     def __str__(self):
         return f"{self.user.username} - {self.media_type} - {self.created_at}"
+
+
+class AIPackage(models.Model):
+    name = models.CharField(max_length=100)
+    description = models.CharField(max_length=255, blank=True)
+    videos_count = models.PositiveIntegerField(default=0, help_text="Videos que incluye el paquete")
+    images_count = models.PositiveIntegerField(default=0, help_text="Imágenes que incluye el paquete")
+    price = models.DecimalField(max_digits=6, decimal_places=2, help_text="Precio en USD")
+    is_featured = models.BooleanField(default=False, help_text="Destacar este paquete")
+    is_active = models.BooleanField(default=True)
+    order = models.PositiveIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['order', 'price']
+        verbose_name = 'AI Package'
+        verbose_name_plural = 'AI Packages'
+
+    def __str__(self):
+        return f"{self.name} — {self.videos_count}v + {self.images_count}i — ${self.price}"
+
+
+class AIWallet(models.Model):
+    """
+    Billetera de créditos IA por usuario — completamente independiente
+    de las suscripciones. Se recarga comprando paquetes con el wallet.
+    """
+    user = models.OneToOneField(
+        'users.User',
+        on_delete=models.CASCADE,
+        related_name='ai_wallet',
+    )
+    video_credits = models.PositiveIntegerField(default=0, help_text="Créditos de video disponibles")
+    image_credits = models.PositiveIntegerField(default=0, help_text="Créditos de imagen disponibles")
+    total_videos_generated = models.PositiveIntegerField(default=0, help_text="Videos generados histórico")
+    total_images_generated = models.PositiveIntegerField(default=0, help_text="Imágenes generadas histórico")
+    updated_at = models.DateTimeField(auto_now=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = 'AI Wallet'
+        verbose_name_plural = 'AI Wallets'
+
+    def __str__(self):
+        return f"{self.user.username} — {self.video_credits}v / {self.image_credits}i"
+
+    @classmethod
+    def get_or_create_for(cls, user):
+        wallet, _ = cls.objects.get_or_create(user=user)
+        return wallet
+
+    def can_generate_video(self, duration=6):
+        import math
+        cost = math.ceil(duration / 6)
+        if self.video_credits < cost:
+            available_secs = self.video_credits * 6
+            return False, f"No tienes suficientes segundos disponibles. Tienes {available_secs}s y necesitas {duration}s."
+        return True, "Ok"
+
+    def can_generate_image(self):
+        if self.image_credits <= 0:
+            return False, "No tienes créditos de imagen disponibles. Recarga en Imagina IA."
+        return True, "Ok"
+
+    def consume_video(self, duration=6):
+        import math
+        cost = math.ceil(duration / 6)
+        self.video_credits = max(0, self.video_credits - cost)
+        self.total_videos_generated += 1
+        self.save(update_fields=['video_credits', 'total_videos_generated', 'updated_at'])
+
+    def consume_image(self):
+        self.image_credits = max(0, self.image_credits - 1)
+        self.total_images_generated += 1
+        self.save(update_fields=['image_credits', 'total_images_generated', 'updated_at'])
+
+    def add_credits(self, videos=0, images=0):
+        self.video_credits += videos
+        self.image_credits += images
+        self.save(update_fields=['video_credits', 'image_credits', 'updated_at'])
+
+
+class AudioTrack(models.Model):
+    CATEGORY_CHOICES = [
+        ('trending',   'Tendencias'),
+        ('pop',        'Pop'),
+        ('urban',      'Urban'),
+        ('electronic', 'Electronic'),
+        ('latin',      'Latin'),
+        ('chill',      'Chill'),
+    ]
+
+    title      = models.CharField(max_length=255)
+    artist     = models.CharField(max_length=255)
+    cover      = models.ImageField(upload_to='audio_tracks/covers/', blank=True, null=True)
+    audio_file = models.FileField(upload_to='audio_tracks/files/')
+    duration_secs = models.PositiveIntegerField(default=0, help_text='Duración en segundos')
+    category   = models.CharField(max_length=20, choices=CATEGORY_CHOICES, default='trending')
+    is_active  = models.BooleanField(default=True)
+    play_count = models.PositiveIntegerField(default=0, editable=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        verbose_name = 'Audio Track'
+        verbose_name_plural = 'Audio Tracks'
+
+    def __str__(self):
+        return f"{self.title} — {self.artist}"
+
+    @property
+    def duration_display(self):
+        m, s = divmod(self.duration_secs, 60)
+        return f"{m}:{s:02d}"
+
+
+class FavoriteTrack(models.Model):
+    user  = models.ForeignKey(User, on_delete=models.CASCADE, related_name='favorite_tracks')
+    track = models.ForeignKey(AudioTrack, on_delete=models.CASCADE, related_name='favorited_by')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ('user', 'track')
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"{self.user.username} ♥ {self.track.title}"
+
+
+# ── File cleanup signals ───────────────────────────────────────────────────────
+
+def _delete_file(field):
+    """Delete a FileField/ImageField file from storage, ignoring missing files."""
+    try:
+        if field and field.name:
+            from django.core.files.storage import default_storage
+            if default_storage.exists(field.name):
+                default_storage.delete(field.name)
+    except Exception:
+        pass
+
+
+@receiver(post_save, sender=GiftStory)
+def generate_gift_thumbnail(sender, instance, created, **kwargs):
+    """Extract first frame of gift video as thumbnail using ffmpeg."""
+    if not instance.video or instance.thumbnail:
+        return
+    try:
+        import subprocess, tempfile
+        from django.core.files.base import ContentFile
+        from django.core.files.storage import default_storage
+
+        video_path = instance.video.path
+        with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp:
+            tmp_path = tmp.name
+
+        result = subprocess.run(
+            ['ffmpeg', '-y', '-i', video_path, '-vframes', '1', '-q:v', '2', tmp_path],
+            capture_output=True, timeout=30
+        )
+        if result.returncode == 0:
+            with open(tmp_path, 'rb') as f:
+                thumb_name = f'gifts/thumbnails/{instance.slug}.jpg'
+                saved_path = default_storage.save(thumb_name, ContentFile(f.read()))
+                GiftStory.objects.filter(pk=instance.pk).update(thumbnail=saved_path)
+
+        os.unlink(tmp_path)
+    except Exception:
+        pass
+
+
+@receiver(post_delete, sender=StoryMedia)
+def delete_story_media_file(sender, instance, **kwargs):
+    _delete_file(instance.file)
+
+
+@receiver(post_delete, sender=Story)
+def delete_story_sticker_files(sender, instance, **kwargs):
+    """When a story is deleted, remove any uploaded sticker files from storage."""
+    from django.core.files.storage import default_storage
+    for layer in (instance.sticker_layers or []):
+        if layer.get("kind") in ("image", "video"):
+            src = layer.get("src", "")
+            if src and src.startswith("http"):
+                # Extract relative path from absolute URL
+                from urllib.parse import urlparse
+                from django.conf import settings
+                parsed = urlparse(src)
+                media_url = getattr(settings, "MEDIA_URL", "/media/")
+                if parsed.path.startswith(media_url):
+                    rel_path = parsed.path[len(media_url):]
+                    try:
+                        if default_storage.exists(rel_path):
+                            default_storage.delete(rel_path)
+                    except Exception:
+                        pass
+
+
+@receiver(post_delete, sender=Video)
+def delete_video_files(sender, instance, **kwargs):
+    _delete_file(instance.video)

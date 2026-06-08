@@ -52,8 +52,8 @@ class BankAccountSerializer(serializers.ModelSerializer):
         # crear onboarding link para que agregue su banco
         account_link = stripe.AccountLink.create(
             account=stripe_account.id,
-            refresh_url="https://tuapp.com/reconnect",
-            return_url="http://localhost:5173/success",
+            refresh_url=settings.FRONTEND_URL.rstrip('/') + '/wallet',
+            return_url=settings.FRONTEND_URL.rstrip('/') + '/wallet-success',
             type="account_onboarding",
         )
 
@@ -71,3 +71,33 @@ class TokenPackageSerializer(serializers.ModelSerializer):
     class Meta:
         model = TokenPackage
         fields = ['id', 'tokens', 'price', 'is_popular', 'color_gradient']
+
+
+class TransactionSerializer(serializers.ModelSerializer):
+    """Read-only serializer for transaction history."""
+    direction = serializers.SerializerMethodField()
+    display_description = serializers.SerializerMethodField()
+
+    class Meta:
+        model = TransactionModel
+        fields = [
+            'id', 'transaction_type', 'status', 'amount',
+            'description', 'payment_id', 'direction',
+            'display_description', 'created_at',
+        ]
+
+    def get_direction(self, obj) -> str:
+        """income for deposits, expense for withdrawals/transfers."""
+        if obj.transaction_type == 'deposit':
+            return 'income'
+        return 'expense'
+
+    def get_display_description(self, obj) -> str:
+        if obj.description:
+            return obj.description
+        labels = {
+            'deposit':    'Depósito recibido',
+            'withdrawal': 'Retiro de fondos',
+            'transfer':   'Transferencia de tokens',
+        }
+        return labels.get(obj.transaction_type, obj.transaction_type.capitalize())

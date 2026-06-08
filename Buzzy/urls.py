@@ -13,6 +13,8 @@ urlpatterns = [
     path('api/subscriptions/', include('apps.subscriptions.urls')),
     path('api/ads/', include('apps.ads.urls')),
     path('api/recommendations/', include('apps.recommendations.urls')),
+    path('api/banners/', include('apps.banners.urls')),
+    path('', include('apps.referrals.urls', namespace='referrals')),
 ]
 
 urlpatterns += [

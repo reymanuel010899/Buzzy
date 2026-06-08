@@ -1,7 +1,18 @@
+from django.shortcuts import get_object_or_404
 import stripe
 import secrets
 from datetime import timedelta
 from django.conf import settings
+
+
+def _abs_caller(pic_field):
+    if not pic_field:
+        return None
+    s = pic_field.url if hasattr(pic_field, 'url') else str(pic_field)
+    if s.startswith("http"):
+        return s
+    base = settings.BACKEND_URL.rstrip("/")
+    return f"{base}{s}" if s.startswith("/") else f"{base}/{s}"
 from django.http import HttpResponse
 from django.views.decorators.csrf import csrf_exempt
 from rest_framework import status, permissions
@@ -175,16 +186,19 @@ class CallInitiateView(CallServiceMixin, APIView):
         # Notify callee via socket for real-time UI popup
         try:
             import httpx
+            _ws_headers = {"X-Broadcast-Secret": settings.BROADCAST_SECRET}
             with httpx.Client() as client:
                 client.post(
                     f"{settings.SOCKET_URL}/broadcast-call/",
                     json={
+                        "event": "incoming_call",
                         "type": "incoming_call",
                         "call": get_call_payload(call_session, caller_token, callee_token)['callee'],
                         "recipient_id": callee.id,
                         "caller_username": caller.username,
-                        "caller_avatar": caller.profile_picture.url if caller.profile_picture else None,
+                        "caller_avatar": _abs_caller(caller.profile_picture),
                     },
+                    headers=_ws_headers,
                     timeout=2.0
                 )
         except Exception:
@@ -197,7 +211,7 @@ class CallInitiateView(CallServiceMixin, APIView):
             'call_id': str(call_session.uuid),
             'call_type': call_type,
             'caller_username': caller.username,
-            'caller_avatar': caller.profile_picture.url if caller.profile_picture else None,
+            'caller_avatar': _abs_caller(caller.profile_picture),
             'channel_name': channel_name,
         }
         push_result = send_call_push_notification(callee, push_payload)
@@ -241,15 +255,18 @@ class CallAcceptView(APIView):
         # Notify caller via socket
         try:
             import httpx
+            _ws_headers = {"X-Broadcast-Secret": settings.BROADCAST_SECRET}
             with httpx.Client() as client:
                 client.post(
                     f"{settings.SOCKET_URL}/broadcast-call/",
                     json={
+                        "event": "call_accepted",
                         "type": "call_accepted",
                         "uuid": str(call_session.uuid),
                         "recipient_id": call_session.caller_id,
                         "answered_at": call_session.answered_at.isoformat(),
                     },
+                    headers=_ws_headers,
                     timeout=2.0
                 )
         except Exception:
@@ -303,15 +320,18 @@ class CallEndView(APIView):
         try:
             other_id = call_session.callee_id if request.user.id == call_session.caller_id else call_session.caller_id
             import httpx
+            _ws_headers = {"X-Broadcast-Secret": settings.BROADCAST_SECRET}
             with httpx.Client() as client:
                 client.post(
                     f"{settings.SOCKET_URL}/broadcast-call/",
                     json={
+                        "event": "call_ended",
                         "type": "call_ended",
                         "uuid": str(call_session.uuid),
                         "recipient_id": other_id,
                         "reason": reason,
                     },
+                    headers=_ws_headers,
                     timeout=2.0
                 )
         except Exception:
@@ -328,6 +348,13 @@ class AgoraCallWebhookView(APIView):
     permission_classes = [permissions.AllowAny]
 
     def post(self, request, *args, **kwargs):
+        # Verificar secret para que solo nuestro backend pueda cerrar llamadas
+        webhook_secret = getattr(settings, 'AGORA_WEBHOOK_SECRET', '')
+        if webhook_secret:
+            incoming = request.headers.get('X-Agora-Secret', '')
+            if not secrets.compare_digest(incoming, webhook_secret):
+                return Response({'error': 'Forbidden'}, status=403)
+
         call_id = request.data.get('call_id')
         duration_seconds = request.data.get('duration_seconds') or request.data.get('duration') or 0
         reason = request.data.get('reason') or 'agora_webhook'
@@ -423,6 +450,39 @@ class StripeWebhookView(APIView):
                         print(f"Successfully activated subscription for {user_id} -> {subscribed_to_id} via webhook")
                     except Exception as e:
                         print(f"Error processing subscription webhook for user {user_id}: {e}")
+
+        elif event['type'] in ('invoice.payment_succeeded', 'invoice.paid'):
+            invoice = event['data']['object']
+            stripe_subscription_id = invoice.get('subscription')
+            amount_paid = invoice.get('amount_paid', 0)
+            stripe_invoice_id = invoice.get('id')
+
+            if not stripe_subscription_id or amount_paid == 0:
+                return HttpResponse(status=200)
+
+            try:
+                from django.contrib.auth import get_user_model
+                from apps.wallet.models import WalletModel, TransactionModel
+
+                user_sub = UserSubscription.objects.select_related('subscriber').get(
+                    stripe_subscription_id=stripe_subscription_id
+                )
+                wallet = WalletModel.objects.get(user=user_sub.subscriber)
+
+                # Avoid duplicate transactions for the same invoice
+                if not TransactionModel.objects.filter(payment_id=stripe_invoice_id).exists():
+                    TransactionModel.objects.create(
+                        wallet=wallet,
+                        transaction_type='withdrawal',
+                        status='completed',
+                        amount=round(amount_paid / 100, 2),
+                        description="Cuota de suscripción vía Stripe",
+                        payment_id=stripe_invoice_id,
+                    )
+            except UserSubscription.DoesNotExist:
+                print(f"No UserSubscription found for stripe_subscription_id={stripe_subscription_id}")
+            except Exception as e:
+                print(f"Error processing invoice webhook: {e}")
 
         return HttpResponse(status=200)
 

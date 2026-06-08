@@ -5,7 +5,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
-from apps.wallet.serializers import TransactiosCreateSerializer, WalletSerializer
+from apps.wallet.serializers import TransactiosCreateSerializer, TransactionSerializer, WalletSerializer
 from apps.wallet.models import WalletModel, TransactionModel
 from .models import BankAccount, TokenPackage, GlobalSettings
 from .serializers import BankAccountSerializer, TokenPackageSerializer
@@ -32,7 +32,12 @@ class GetWalletApiVIew(APIView):
                 wallet_type='main'
             )
         serializer = WalletSerializer(wallet)
-        return Response(serializer.data)
+        gs = GlobalSettings.get_settings()
+        data = serializer.data
+        data['tokens'] = wallet.tokens
+        data['token_value_usd'] = float(gs.custom_token_price_usd)
+        data['gift_fee_pct'] = float(gs.gift_fee_pct)
+        return Response(data)
 
 class CreateDepositSessionView(APIView):
     permission_classes = [IsAuthenticated]
@@ -352,26 +357,81 @@ class CalculateTokenPriceApiView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        tokens_str = request.query_params.get('tokens')
-        if not tokens_str:
-            return Response({'error': 'Cantidad de tokens requerida.'}, status=status.HTTP_400_BAD_REQUEST)
-        
-        try:
-            tokens_qty = int(tokens_str)
-            if tokens_qty <= 0:
-                raise ValueError
-        except ValueError:
-            return Response({'error': 'Cantidad inválida.'}, status=status.HTTP_400_BAD_REQUEST)
-            
         settings = GlobalSettings.get_settings()
         price_per_token = Decimal(str(settings.custom_token_price_usd))
-        total_price = Decimal(str(tokens_qty)) * price_per_token
-        
+
+        usd_str = request.query_params.get('usd')
+        tokens_str = request.query_params.get('tokens')
+
+        if usd_str:
+            try:
+                usd_amount = Decimal(usd_str)
+                if usd_amount <= 0:
+                    raise ValueError
+            except (ValueError, Exception):
+                return Response({'error': 'Monto inválido.'}, status=status.HTTP_400_BAD_REQUEST)
+            tokens_qty = int(usd_amount / price_per_token)
+            return Response({
+                'usd': round(usd_amount, 2),
+                'tokens': tokens_qty,
+            }, status=status.HTTP_200_OK)
+
+        if tokens_str:
+            try:
+                tokens_qty = int(tokens_str)
+                if tokens_qty <= 0:
+                    raise ValueError
+            except ValueError:
+                return Response({'error': 'Cantidad inválida.'}, status=status.HTTP_400_BAD_REQUEST)
+            total_price = Decimal(str(tokens_qty)) * price_per_token
+            return Response({
+                'tokens': tokens_qty,
+                'total_price': round(total_price, 2)
+            }, status=status.HTTP_200_OK)
+
+        return Response({'error': 'Parámetro "usd" o "tokens" requerido.'}, status=status.HTTP_400_BAD_REQUEST)
+
+class ConvertTokensView(APIView):
+    """Convierte todos los tokens del usuario a USD en su wallet."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        try:
+            wallet = WalletModel.objects.get(user=request.user)
+        except WalletModel.DoesNotExist:
+            return Response({'error': 'Wallet no encontrada'}, status=400)
+
+        if wallet.tokens <= 0:
+            return Response({'error': 'No tienes tokens para convertir'}, status=400)
+
+        gs = GlobalSettings.get_settings()
+        tokens_to_convert = wallet.tokens
+        usd_amount = Decimal(str(tokens_to_convert)) * Decimal(str(gs.custom_token_price_usd))
+        usd_amount = usd_amount.quantize(Decimal('0.01'))
+
+        wallet.tokens = 0
+        wallet.balance += usd_amount
+        wallet.save()
+
+        TransactionModel.objects.create(
+            wallet=wallet,
+            amount=usd_amount,
+            transaction_type='income',
+            description=f'Conversión de {tokens_to_convert} tokens a USD',
+            status='completed'
+        )
+
+        serializer = WalletSerializer(wallet)
+        data = serializer.data
+        data['tokens'] = wallet.tokens
+        data['token_value_usd'] = float(gs.custom_token_price_usd)
+        data['gift_fee_pct'] = float(gs.gift_fee_pct)
         return Response({
-            'tokens': tokens_qty,
-            'price_per_token': price_per_token,
-            'total_price': round(total_price, 2)
-        }, status=status.HTTP_200_OK)
+            'message': f'{tokens_to_convert} tokens convertidos a ${usd_amount} USD',
+            'converted_usd': float(usd_amount),
+            'wallet': data
+        })
+
 
 class StripeAccountStatusView(APIView):
     permission_classes = [IsAuthenticated]
@@ -396,4 +456,36 @@ class StripeAccountStatusView(APIView):
             "active": False,
             "charges_enabled": account.charges_enabled,
             "payouts_enabled": account.payouts_enabled
+        })
+
+class TransactionHistoryView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        wallet = WalletModel.objects.filter(user=request.user).first()
+        if not wallet:
+            return Response({"results": [], "count": 0})
+
+        # filter: all | income (deposit) | expense (withdrawal, transfer)
+        filter_type = request.query_params.get("type", "all")
+        qs = TransactionModel.objects.filter(wallet=wallet).order_by('-created_at')
+
+        if filter_type == "income":
+            qs = qs.filter(transaction_type='deposit')
+        elif filter_type == "expense":
+            qs = qs.filter(transaction_type__in=['withdrawal', 'transfer'])
+
+        # simple pagination: page_size=20
+        page_size = int(request.query_params.get("page_size", 20))
+        page = int(request.query_params.get("page", 1))
+        start = (page - 1) * page_size
+        end = start + page_size
+        total = qs.count()
+        serializer = TransactionSerializer(qs[start:end], many=True)
+        return Response({
+            "count": total,
+            "page": page,
+            "page_size": page_size,
+            "has_next": end < total,
+            "results": serializer.data,
         })

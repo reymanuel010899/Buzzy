@@ -1,7 +1,6 @@
 from django.db import models
 import uuid
 from apps.users.models import User
-from django.db import models
 from django.db.models.signals import post_save
 from django.dispatch import receiver
 
@@ -147,13 +146,13 @@ def create_user_wallet(sender, instance, created, **kwargs):
 
 @receiver(post_save, sender=TransactionModel)
 def update_wallet_balance(sender, instance, created, **kwargs):
-    if created and instance.status == 'completed':
+    # Only auto-credit deposits — withdrawals and transfers are already
+    # deducted by the calling view before the transaction is created,
+    # so we must NOT touch the balance here for those types.
+    if created and instance.status == 'completed' and instance.transaction_type == 'deposit':
         wallet = instance.wallet
-        if instance.transaction_type == 'deposit':
-            wallet.balance += instance.amount
-        elif instance.transaction_type == 'withdrawal':
-            wallet.balance -= instance.amount
-        wallet.save()
+        wallet.balance += instance.amount
+        wallet.save(update_fields=['balance'])
 
 class BankAccount(models.Model):
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='bank_accounts')
@@ -206,10 +205,22 @@ class TokenPackage(models.Model):
 
 class GlobalSettings(models.Model):
     custom_token_price_usd = models.DecimalField(
-        max_digits=10, 
-        decimal_places=4, 
+        max_digits=10,
+        decimal_places=4,
         default=0.015,
         help_text="Precio en USD por cada token en recargas personalizadas."
+    )
+    view_rate_per_1000 = models.DecimalField(
+        max_digits=8,
+        decimal_places=4,
+        default='0.1000',
+        help_text="USD que se paga al creador por cada 1,000 vistas monetizables."
+    )
+    gift_fee_pct = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        default=30.00,
+        help_text="Porcentaje que se queda la plataforma de cada regalo (ej. 30 = 30%)."
     )
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -224,3 +235,82 @@ class GlobalSettings(models.Model):
     def get_settings(cls):
         obj, created = cls.objects.get_or_create(id=1)
         return obj
+
+
+class MonetizableViewLog(models.Model):
+    """
+    Registro de deduplicación: una fila por (user, video, date).
+    Garantiza que un mismo usuario solo genera 1 vista monetizable por video por día,
+    independientemente de cuántas veces el frontend envíe el evento.
+    El backend inserta aquí antes de incrementar VideoStats.monetizable_views.
+    """
+    user    = models.ForeignKey(User, on_delete=models.CASCADE, related_name='monetizable_view_logs')
+    video   = models.ForeignKey('videos.Video', on_delete=models.CASCADE, related_name='monetizable_view_logs')
+    date    = models.DateField()
+
+    class Meta:
+        unique_together = ('user', 'video', 'date')
+        verbose_name = 'Monetizable View Log'
+        verbose_name_plural = 'Monetizable View Logs'
+
+    def __str__(self):
+        return f"{self.user.username} → video {self.video_id} | {self.date}"
+
+
+class VideoEarningsDaily(models.Model):
+    """
+    Snapshot diario de vistas monetizables nuevas por video.
+    La task diaria calcula el delta (vistas nuevas del día) y lo guarda aquí.
+    Al liquidar la semana se marca already_settled=True para nunca pagar dos veces.
+    last_snapshot_total guarda el valor de monetizable_views en el momento del snapshot
+    para que la task sea idempotente (si corre dos veces no dobla el delta).
+    """
+    video                = models.ForeignKey('videos.Video', on_delete=models.CASCADE, related_name='earnings_daily')
+    creator              = models.ForeignKey(User, on_delete=models.CASCADE, related_name='video_earnings_daily')
+    date                 = models.DateField()
+    views_delta          = models.PositiveIntegerField(default=0)   # vistas monetizables nuevas ese día
+    last_snapshot_total  = models.PositiveIntegerField(default=0)   # valor de monetizable_views al hacer snapshot
+    already_settled      = models.BooleanField(default=False)       # True una vez que la semana fue liquidada
+
+    class Meta:
+        unique_together = ('video', 'date')
+        verbose_name = 'Video Earnings Daily'
+        verbose_name_plural = 'Video Earnings Daily'
+
+    def __str__(self):
+        return f"{self.creator.username} | video {self.video_id} | {self.date} | {self.views_delta} views"
+
+
+class CreatorEarningsPeriod(models.Model):
+    """
+    Liquidación semanal por creador.
+    Creada cada lunes por la Celery task, con status=pending hasta que
+    el admin la apruebe — en ese momento se acredita al wallet del creador.
+    """
+    STATUS_CHOICES = [
+        ('pending',    'Pendiente de aprobación'),
+        ('processing', 'Procesando'),
+        ('paid',       'Pagado'),
+        ('rejected',   'Rechazado'),
+    ]
+
+    creator             = models.ForeignKey(User, on_delete=models.CASCADE, related_name='earning_periods')
+    week_start          = models.DateField()   # lunes
+    week_end            = models.DateField()   # domingo
+    monetizable_views   = models.PositiveIntegerField(default=0)   # total de la semana
+    rate_per_1000       = models.DecimalField(max_digits=8, decimal_places=4)  # tarifa vigente al calcular
+    gross_amount        = models.DecimalField(max_digits=10, decimal_places=4, default=0)  # views/1000 × rate
+    platform_fee_pct    = models.DecimalField(max_digits=5, decimal_places=2, default=0)   # reservado para futuro
+    net_amount          = models.DecimalField(max_digits=10, decimal_places=4, default=0)  # lo que cobra el creador
+    status              = models.CharField(max_length=12, choices=STATUS_CHOICES, default='pending')
+    paid_at             = models.DateTimeField(null=True, blank=True)
+    created_at          = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ('creator', 'week_start')
+        verbose_name = 'Creator Earnings Period'
+        verbose_name_plural = 'Creator Earnings Periods'
+        ordering = ['-week_start']
+
+    def __str__(self):
+        return f"{self.creator.username} | {self.week_start} → {self.week_end} | ${self.net_amount} | {self.status}"

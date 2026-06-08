@@ -27,7 +27,6 @@ class SubscriptionBenefit(models.Model):
         ('MESSAGES', 'Mensages Mensuales'),
         ('COMMENTS', 'Comentarios VIP'),
         ('DESIGNS', 'Nuevo Design Interface'),
-        ('AI_GENERATION', 'Generación de Videos/Imágenes con IA'),
         ('OTHER', 'Otros beneficios'),
     ]
     
@@ -62,7 +61,6 @@ class UserSubscription(models.Model):
     video_calls_this_month = models.PositiveIntegerField(default=0)
     voice_seconds_this_month = models.PositiveIntegerField(default=0)
     video_seconds_consumed_this_month = models.PositiveIntegerField(default=0)
-    ai_generations_this_month = models.PositiveIntegerField(default=0)
     last_reset_date = models.DateField(auto_now_add=True)
 
     def activate(self, plan, stripe_subscription_id=None, stripe_customer_id=None):
@@ -81,10 +79,9 @@ class UserSubscription(models.Model):
         self.video_calls_this_month = 0
         self.voice_seconds_this_month = 0
         self.video_seconds_consumed_this_month = 0
-        self.ai_generations_this_month = 0
         from django.utils import timezone
         self.last_reset_date = timezone.now().date()
-        
+
         self.is_active = True
         self.save()
 
@@ -104,7 +101,6 @@ class UserSubscription(models.Model):
             self.video_calls_this_month = 0
             self.voice_seconds_this_month = 0
             self.video_seconds_consumed_this_month = 0
-            self.ai_generations_this_month = 0
             self.last_reset_date = now
             self.save()
 
@@ -171,21 +167,6 @@ class UserSubscription(models.Model):
         if remaining_seconds <= 0:
             return False, f"Has alcanzado tu límite de {limit} minutos de videollamadas este mes."
 
-        return True, "Ok"
-
-    def can_generate_ai(self):
-        self.reset_if_new_month()
-        if not self.is_active or not self.plan:
-            return False, "Necesitas una suscripción activa para usar la IA."
-            
-        limit = self.get_benefit_limit('AI_GENERATION')
-
-        if limit == 0:
-            return False, "Tu plan no incluye generación con IA."
-            
-        if self.ai_generations_this_month >= limit:
-            return False, f"Has alcanzado tu límite de {limit} generaciones con IA este mes."
-        
         return True, "Ok"
 
     def can_post_comment(self):

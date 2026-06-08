@@ -1,8 +1,12 @@
+from datetime import timedelta
 from django.utils import timezone
 from django.contrib.auth.models import AbstractBaseUser, BaseUserManager, PermissionsMixin
 from django.db import models
 from .manayers import CustomUserManager
 from django.core.exceptions import ValidationError
+from django.contrib.auth.hashers import make_password, check_password
+from django.db.models.signals import post_save
+from django.dispatch import receiver
 # Create your models here.
 
 class Country(models.Model):
@@ -18,18 +22,33 @@ class User(AbstractBaseUser, PermissionsMixin):
     first_name = models.CharField(max_length=30, blank=True)
     last_name = models.CharField(max_length=30, blank=True)
     birthdate = models.DateField(null=True, blank=True)
-    profile_picture = models.ImageField(upload_to='profile_pics/photo/', default='profile_pics/avatar.webp',  null=True, blank=True)
+    profile_picture = models.ImageField(upload_to='profile_pics/photo/', default='profile_pics/avatar.webp', null=True, blank=True)
     profile_video = models.FileField(upload_to='profile_videos/video/', null=True, blank=True)
     country = models.ForeignKey(Country, on_delete=models.SET_NULL, null=True, blank=True)
-    phone_number = models.CharField(max_length=20, null=True, blank=True)
+    phone_number = models.CharField(max_length=20, null=True, blank=True, unique=True)
     is_phone_verified = models.BooleanField(default=False)
+    sms_attempts = models.PositiveSmallIntegerField(default=0)
+    sms_blocked_until = models.DateTimeField(null=True, blank=True)
     bio = models.TextField(null=True, blank=True)
     is_active = models.BooleanField(default=True)
     is_staff = models.BooleanField(default=False)
+    
+    # Language preference
+    LANGUAGE_CHOICES = [('en', 'English'), ('es', 'Español')]
+    language = models.CharField(max_length=10, choices=LANGUAGE_CHOICES, default='en')
 
     # Recovery codes
     reset_password_code = models.CharField(max_length=6, null=True, blank=True)
     reset_password_expires = models.DateTimeField(null=True, blank=True)
+
+    # IP de registro — para limitar 5 cuentas por IP
+    registration_ip = models.GenericIPAddressField(null=True, blank=True)
+
+    is_owner = models.BooleanField(default=False)
+    onboarding_completed = models.BooleanField(default=False)
+
+    # Referral pendiente: se guarda al registro y se procesa solo cuando el teléfono es verificado con Firebase
+    pending_referral_code = models.CharField(max_length=64, null=True, blank=True)
 
     objects = CustomUserManager()
 
@@ -38,43 +57,81 @@ class User(AbstractBaseUser, PermissionsMixin):
 
     def __str__(self):
         return self.username
-    
+
     def all_followers(self):
         return self.followers.all()
-    
+
     def all_followed(self):
         return self.following.all()
-    
+
     def total_social_followers(self):
-        """Suma los seguidores de todas las redes sociales conectadas."""
         return sum(account.followers_count for account in self.social_accounts.all())
 
     def all_likes(self):
-        total = sum(like.like_video_reverce.count() for like in self.user_reverce.all())
-        return total
+        return sum(like.like_video_reverce.count() for like in self.user_reverce.all())
 
     def all_comments(self):
-        total = sum(comment.comernt_video_reverce.count() for comment in self.user_reverce.all())
-        return total
+        return sum(comment.comernt_video_reverce.count() for comment in self.user_reverce.all())
 
     def all_views(self):
-        total = sum(video.video_reverce.count() for video in self.user_reverce.all())
-        total = sum(video.video_reverce.count() for video in self.user_reverce.all())
-        return total
-    
+        return sum(video.video_reverce.count() for video in self.user_reverce.all())
+
     def is_currently_available(self):
-        """Checks if the user is currently within any of their active availability slots."""
         now = timezone.localtime()
         current_day = now.weekday()
         current_time = now.time().replace(tzinfo=None, microsecond=0)
-        print(f"Checking  availability for {self.username} at {current_day} {current_time}")
-        print("local time:", self.availabilities.filter(day_of_week=current_day,  is_active=True,start_time__lte=current_time,))
         return self.availabilities.filter(
             day_of_week=current_day,
             is_active=True,
             start_time__lte=current_time,
             end_time__gte=current_time
         ).exists()
+
+
+class FCMDevice(models.Model):
+    """Guarda los tokens FCM de los dispositivos móviles de cada usuario."""
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="fcm_devices")
+    token = models.TextField(unique=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        indexes = [models.Index(fields=["user"])]
+
+    def __str__(self):
+        return f"{self.user.username} — {self.token[:20]}..."
+
+class BuzzyPremium(models.Model):
+    """Platform-level Premium subscription (Buzzy Premium, $5.99/mo)."""
+    STATUS_CHOICES = [
+        ('active', 'Active'),
+        ('cancelled', 'Cancelled'),
+        ('expired', 'Expired'),
+    ]
+    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='buzzy_premium')
+    stripe_subscription_id = models.CharField(max_length=100, blank=True, null=True)
+    stripe_customer_id = models.CharField(max_length=100, blank=True, null=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='active')
+    started_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField(null=True, blank=True)
+    cancelled_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        verbose_name = 'Buzzy Premium'
+        verbose_name_plural = 'Buzzy Premiums'
+
+    def __str__(self):
+        return f"{self.user.username} — Premium ({self.status})"
+
+    @property
+    def is_active(self):
+        from django.utils import timezone
+        if self.status != 'active':
+            return False
+        if self.expires_at and self.expires_at < timezone.now():
+            return False
+        return True
+
 
 class Trending(models.Model):
     term = models.CharField(max_length=255, unique=True)
@@ -169,3 +226,51 @@ class SocialAccount(models.Model):
 
     def __str__(self):
         return f"{self.user.username} → {self.platform} (@{self.platform_username})"
+
+
+class UserSecurity(models.Model):
+    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='security')
+    chat_pin_hash = models.CharField(max_length=255, blank=True, default='')
+    hidden_pin_verified_at = models.DateTimeField(null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = 'User Security'
+        verbose_name_plural = 'User Security'
+
+    def __str__(self):
+        return f"{self.user.username} security"
+
+    @property
+    def has_chat_pin(self) -> bool:
+        return bool(self.chat_pin_hash)
+
+    def set_chat_pin(self, pin: str) -> None:
+        self.chat_pin_hash = make_password(pin)
+        self.hidden_pin_verified_at = None
+        self.save(update_fields=['chat_pin_hash', 'hidden_pin_verified_at', 'updated_at'])
+
+    def clear_chat_pin(self) -> None:
+        self.chat_pin_hash = ''
+        self.hidden_pin_verified_at = None
+        self.save(update_fields=['chat_pin_hash', 'hidden_pin_verified_at', 'updated_at'])
+
+    def verify_chat_pin(self, pin: str) -> bool:
+        if not self.chat_pin_hash:
+            return False
+        return check_password(pin, self.chat_pin_hash)
+
+    def mark_hidden_verified(self) -> None:
+        self.hidden_pin_verified_at = timezone.now()
+        self.save(update_fields=['hidden_pin_verified_at', 'updated_at'])
+
+    def hidden_access_is_fresh(self, minutes: int = 5) -> bool:
+        if not self.hidden_pin_verified_at:
+            return False
+        return timezone.now() - self.hidden_pin_verified_at <= timedelta(minutes=minutes)
+
+
+@receiver(post_save, sender=User)
+def ensure_user_security(sender, instance, created, **kwargs):
+    if created:
+        UserSecurity.objects.get_or_create(user=instance)

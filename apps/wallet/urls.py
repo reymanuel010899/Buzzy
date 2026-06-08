@@ -14,4 +14,6 @@ urlpatterns = [
     path('api/wallet/bank-accounts/<int:pk>/', views.BankAccountDeleteView.as_view(), name='bank-accounts-delete'),
     path('api/wallet/token-packages/', views.TokenPackageListView.as_view(), name='token-packages-list'),
     path('api/wallet/calculate-token-price/', views.CalculateTokenPriceApiView.as_view(), name='calculate-token-price'),
+    path('api/wallet/transactions/', views.TransactionHistoryView.as_view(), name='transaction-history'),
+    path('api/wallet/convert-tokens/', views.ConvertTokensView.as_view(), name='convert-tokens'),
 ]

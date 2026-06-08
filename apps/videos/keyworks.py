@@ -522,6 +522,17 @@ YOLO_TO_CATEGORY: dict[str, str] = {
     "bear":           "Naturaleza y Animales",
     "zebra":          "Naturaleza y Animales",
     "giraffe":        "Naturaleza y Animales",
+    # YOLO uses these for big cats (lion, tiger detected as cat class)
+    "lion":           "Naturaleza y Animales",
+    "tiger":          "Naturaleza y Animales",
+    "leopard":        "Naturaleza y Animales",
+    "wolf":           "Naturaleza y Animales",
+    "fox":            "Naturaleza y Animales",
+    "deer":           "Naturaleza y Animales",
+    "rabbit":         "Naturaleza y Animales",
+    "squirrel":       "Naturaleza y Animales",
+    "snake":          "Naturaleza y Animales",
+    "fish":           "Naturaleza y Animales",
     # Deportes y Fitness
     "sports ball":    "Deportes y Fitness",
     "tennis racket":  "Deportes y Fitness",

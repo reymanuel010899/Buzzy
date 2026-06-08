@@ -2,7 +2,8 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
-from django.db.models import Q
+from django.db.models import Q, F
+from django.db import IntegrityError
 from apps.users.models import User, Trending, RecentSearch
 from apps.videos.models import Video
 from apps.users.serializers import DetailedUserSerializer, TrendingSerializer, RecentSearchSerializer
@@ -23,10 +24,13 @@ class GlobalSearchView(APIView):
         )
 
         # 2. Update Trending
-        trending, created = Trending.objects.get_or_create(term=query)
-        if not created:
-            trending.count += 1
-            trending.save()
+        try:
+            trending, created = Trending.objects.get_or_create(term=query)
+            if not created:
+                trending.count += 1
+                trending.save()
+        except IntegrityError:
+            Trending.objects.filter(term=query).update(count=F('count') + 1)
 
         # 3. Search Users
         users = User.objects.filter(

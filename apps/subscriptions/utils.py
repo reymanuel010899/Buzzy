@@ -30,7 +30,8 @@ def generate_agora_uids(call_session):
 
 
 def build_channel_name(caller_id, callee_id):
-    return f"buzzy-call-{caller_id}-{callee_id}-{int(time.time())}"
+    import secrets
+    return f"buzzy-call-{caller_id}-{callee_id}-{int(time.time())}-{secrets.token_hex(4)}"
 
 
 def generate_agora_token_payload(channel_name, uid, allowed_seconds, call_id):
@@ -66,60 +67,97 @@ def generate_agora_token_payload(channel_name, uid, allowed_seconds, call_id):
 def send_call_push_notification(receiver, payload):
     """
     Envía una notificación de llamada entrante usando Firebase Admin SDK (HTTP v1).
+    Usa los tokens FCMDevice (registrados por el hook usePushNotifications) y como
+    fallback el device_token guardado en UserOnlineStatus.
     """
-    # 1. Obtención limpia del token desde el modelo OnlineStatus
-    online_status = getattr(receiver, "online_status", None)
-    device_token = online_status.device_token if online_status else None
+    from apps.users.models import FCMDevice
 
-    if not device_token:
+    # Recopilar tokens: primero los de FCMDevice, luego el legacy de OnlineStatus
+    tokens = list(FCMDevice.objects.filter(user=receiver).values_list("token", flat=True))
+    online_status = getattr(receiver, "online_status", None)
+    legacy_token = online_status.device_token if online_status else None
+    if legacy_token and legacy_token not in tokens:
+        tokens.append(legacy_token)
+
+    if not tokens:
         return {"sent": False, "reason": "missing_device_token"}
 
-    # 2. Construcción del mensaje profesional
-    try:
-        # Extraemos el nombre para el cuerpo del mensaje
-        caller_name = payload.get('caller_username', 'Alguien')
-        
-        # 2. Construcción del mensaje profesional
-        data_payload = {k: str(v) for k, v in payload.items()}
-        data_payload['type'] = 'incoming_call'  # Identificador para el frontend
-        
-        message = messaging.Message(
-            token=device_token,
-            data=data_payload,
-            # 'notification' es lo que el usuario ve en el banner del celular
-            notification=messaging.Notification(
-                title="📞 Llamada entrante",
-                body=f"{caller_name} te está llamando",
-            ),
-            # Prioridad alta para que la notificación llegue incluso con batería baja
-            android=messaging.AndroidConfig(
-                priority="high",
-                notification=messaging.AndroidNotification(
-                    click_action="OPEN_CALL_SCREEN" # Opcional: para manejar clicks
-                )
-            ),
-            # Configuración para dispositivos Apple (si los usas en el futuro)
-            apns=messaging.APNSConfig(
-                payload=messaging.APNSPayload(
-                    aps=messaging.Aps(content_available=True)
-                )
-            ),
-        )
-        # 3. Envío a través del SDK oficial
-        response = messaging.send(message)
-        
-        return {
-            "sent": True, 
-            "message_id": response, 
-            "provider": "firebase_v1"
-        }
+    caller_name = payload.get('caller_username', 'Alguien')
+    data_payload = {k: str(v) for k, v in payload.items()}
+    data_payload['type'] = 'incoming_call'
 
-    except Exception as exc:
-        return {
-            "sent": False, 
-            "provider": "firebase_v1", 
-            "reason": str(exc)
-        }
+    results = []
+    for token in tokens:
+        try:
+            message = messaging.Message(
+                token=token,
+                data=data_payload,
+                notification=messaging.Notification(
+                    title="📞 Llamada entrante",
+                    body=f"{caller_name} te está llamando",
+                ),
+                android=messaging.AndroidConfig(
+                    priority="high",
+                    notification=messaging.AndroidNotification(
+                        sound="default",
+                        click_action="OPEN_CALL_SCREEN",
+                    ),
+                ),
+                apns=messaging.APNSConfig(
+                    payload=messaging.APNSPayload(
+                        aps=messaging.Aps(sound="default", content_available=True)
+                    )
+                ),
+            )
+            response = messaging.send(message)
+            results.append({"sent": True, "message_id": response, "token": token[:20]})
+        except Exception as exc:
+            err = str(exc)
+            if "registration-token-not-registered" in err or "invalid-registration-token" in err:
+                from apps.users.models import FCMDevice
+                FCMDevice.objects.filter(token=token).delete()
+            results.append({"sent": False, "reason": err, "token": token[:20]})
+
+    sent_any = any(r["sent"] for r in results)
+    return {"sent": sent_any, "provider": "firebase_v1", "results": results}
+
+def send_push_notification(user, title: str, body: str, data: dict = None):
+    """
+    Sends a push notification to all FCM devices registered for a user.
+    Uses the same Firebase Admin SDK already initialized for call notifications.
+    Returns a list of results (one per device token).
+    """
+    if not messaging:
+        return [{"sent": False, "reason": "firebase_not_initialized"}]
+
+    from apps.users.models import FCMDevice
+    tokens = list(FCMDevice.objects.filter(user=user).values_list("token", flat=True))
+    if not tokens:
+        return [{"sent": False, "reason": "no_device_tokens"}]
+
+    data_payload = {k: str(v) for k, v in (data or {}).items()}
+    results = []
+    for token in tokens:
+        try:
+            message = messaging.Message(
+                token=token,
+                notification=messaging.Notification(title=title, body=body),
+                data=data_payload,
+                android=messaging.AndroidConfig(priority="high"),
+                apns=messaging.APNSConfig(
+                    payload=messaging.APNSPayload(aps=messaging.Aps(sound="default"))
+                ),
+            )
+            response = messaging.send(message)
+            results.append({"sent": True, "message_id": response, "token": token[:20]})
+        except Exception as exc:
+            # Remove invalid tokens automatically
+            err = str(exc)
+            if "registration-token-not-registered" in err or "invalid-registration-token" in err:
+                FCMDevice.objects.filter(token=token).delete()
+            results.append({"sent": False, "reason": err, "token": token[:20]})
+    return results
+
 
 def agora_force_close_channel(call_session):
     customer_id = getattr(settings, "AGORA_CUSTOMER_ID", "")
@@ -187,6 +225,26 @@ def schedule_call_kill(call_session):
             if fresh.status in {"ended", "expired", "failed", "missed", "rejected"}:
                 return
             finalize_call_session(fresh, reason="expired", consumed_seconds=fresh.allowed_seconds, force_close=True)
+            # Notificar a ambos participantes que la llamada expiró
+            socket_url = getattr(settings, "SOCKET_URL", "http://localhost:8001")
+            broadcast_secret = getattr(settings, "BROADCAST_SECRET", "")
+            ws_headers = {"X-Broadcast-Secret": broadcast_secret}
+            for recipient_id in [fresh.caller_id, fresh.callee_id]:
+                try:
+                    requests.post(
+                        f"{socket_url}/broadcast-call/",
+                        json={
+                            "event": "call_ended",
+                            "type": "call_ended",
+                            "uuid": str(fresh.uuid),
+                            "recipient_id": recipient_id,
+                            "reason": "expired",
+                        },
+                        headers=ws_headers,
+                        timeout=2,
+                    )
+                except Exception:
+                    pass
         except Exception as exc:
             try:
                 fresh = CallSession.objects.get(pk=call_session.pk)

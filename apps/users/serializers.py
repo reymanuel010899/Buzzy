@@ -15,15 +15,17 @@ class DetailedUserSerializer(serializers.ModelSerializer):
     subscription_status = serializers.SerializerMethodField(read_only=True)
     has_active_stories = serializers.SerializerMethodField(read_only=True)
     profile_picture = serializers.SerializerMethodField(read_only=True)
-    
+    chat_security = serializers.SerializerMethodField(read_only=True)
+    is_buzzy_premium = serializers.SerializerMethodField(read_only=True)
+
     class Meta:
         model = models.User
-        fields = ('id','username', 'first_name', 'email', 'profile_picture', 'profile_video', 'like_all_count', 'comments_all_count', 'view_all_acount', 'follower_all_acount', 'total_social_followers', 'followed_all_acount', 'is_following', 'subscribers_count', 'subscription_status', 'has_active_stories')
+        fields = ('id','username', 'first_name', 'email', 'bio', 'profile_picture', 'profile_video', 'like_all_count', 'comments_all_count', 'view_all_acount', 'follower_all_acount', 'total_social_followers', 'followed_all_acount', 'is_following', 'subscribers_count', 'subscription_status', 'has_active_stories', 'chat_security', 'is_buzzy_premium', 'is_owner')
 
     def get_profile_picture(self, obj):
 
         if obj.profile_picture:
-            return obj.profile_picture.name
+            return obj.profile_picture.url
         return None
 
     def get_subscription_status(self, obj):
@@ -88,7 +90,29 @@ class DetailedUserSerializer(serializers.ModelSerializer):
         from datetime import timedelta
         limit = timezone.now() - timedelta(hours=24)
         return Story.objects.filter(user=obj, is_active=True, created_at__gte=limit).exists()
-    
+
+    def get_chat_security(self, obj):
+        request = self.context.get('request')
+        if not request or not request.user.is_authenticated or request.user != obj:
+            return None
+
+        from .models import UserSecurity
+        security = UserSecurity.objects.filter(user=obj).first()
+        if not security:
+            return None
+
+        return {
+            "has_pin": bool(security.chat_pin_hash),
+            "hidden_verified_at": security.hidden_pin_verified_at,
+            "hidden_verified": bool(security.hidden_pin_verified_at),
+        }
+
+    def get_is_buzzy_premium(self, obj):
+        try:
+            return obj.buzzy_premium.is_active
+        except Exception:
+            return False
+
 class LoginZerializer(serializers.Serializer):
     username = serializers.CharField()
     password = serializers.CharField()
