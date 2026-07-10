@@ -17,9 +17,9 @@ from rest_framework.permissions import IsAuthenticated
 from django.db.models import Q, Exists, OuterRef
 from django.db import ProgrammingError
 # from apps.wallet.models import WalletModel
-from .models import AudioTrack, ChatRoom, Comment, FavoriteTrack, Follower, GiftStory, Like, Message, MessageReaction, Notification, SavedVideo, Story, StoryGift, StoryLike, StoryMedia, StoryReport, StoryView, UserGift, UserOnlineStatus, Video, VideoGift, VideoStats, View, User
+from .models import AudioTrack, ChatRoom, Comment, FavoriteTrack, Follower, GiftStory, Like, Message, Notification, SavedVideo, Story, StoryGift, StoryLike, StoryMedia, StoryReport, StoryView, UserGift, UserOnlineStatus, Video, VideoGift, VideoStats, View, User
 from .serializers import AudioTrackSerializer, ChatRoomSerializer, FavoriteTrackSerializer, FollowerListSerializer, CommentSerializers, FollowerSerializer, GetGiftStorySerializer, GiftRecivedSerializer, GiftStorySerializer, LikeSerializers, ListCommentsZerializers, MessageSerializer, NotificationSerializer, StoryLikeSerializer, StorySerializer, StoryViewSerializer, UserSerializers, VideoZerializer, ViewSerializers, formated_created
-from apps.wallet.models import WalletModel, GlobalSettings
+from apps.wallet.models import WalletModel, GlobalSettings, CreatorBonus
 from apps.wallet.serializers import WalletSerializer
 from django.core.cache import cache
 from collections import Counter
@@ -38,6 +38,30 @@ def _abs(path):
     base = settings.BACKEND_URL.rstrip("/")
     s = str(path)
     return f"{base}{s}" if s.startswith("/") else f"{base}/{s}"
+
+
+def _normalize_audio_track_url(url):
+    """
+    Normaliza la URL de una pista a su RUTA cruda de storage ("audio_tracks/...").
+
+    El cliente nos manda la URL tal como la recibió del selector, que ahora viene
+    FIRMADA y absoluta (https://host/media-signed/audio_tracks/x.mp3?expires=&sig=).
+    Guardar eso en la BD congelaría una firma que vence en horas. Extraemos solo la
+    ruta del archivo para que VideoZerializer.get_audio_track_url la firme fresca en
+    cada respuesta. Acepta URLs absolutas, /media/, /media-signed/ o ya-relativas.
+    """
+    if not url:
+        return None
+    from urllib.parse import urlparse, unquote
+    s = str(url)
+    path = urlparse(s).path if s.startswith("http") else s   # quita host + query (firma)
+    path = unquote(path)
+    # Quitar prefijos de servido para quedarnos con la ruta dentro de MEDIA_ROOT.
+    for prefix in ("/media-signed/", "/media/"):
+        if path.startswith(prefix):
+            path = path[len(prefix):]
+            break
+    return path.lstrip("/") or None
 
 
 def _ws_headers() -> dict:
@@ -205,49 +229,25 @@ class UserVideosApiView(ListAPIView):
             pass
         elif viewer.is_authenticated:
             from apps.videos.models import Follower as FollowerModel
-            i_follow = FollowerModel.objects.filter(
+            from apps.subscriptions.models import UserSubscription
+            # Autores a quienes el viewer sigue (dirección única). Los videos
+            # 'followers' se ven si sigues al autor; no requiere follow mutuo.
+            authors_i_follow = FollowerModel.objects.filter(
                 user_id=viewer
             ).values_list('follower_user_id_id', flat=True)
-            followers_of_me = FollowerModel.objects.filter(
-                follower_user_id=viewer
-            ).values_list('user_id_id', flat=True)
-            mutual_ids = set(i_follow) & set(followers_of_me)
+            # Autores a quienes el viewer está suscrito activamente.
+            authors_i_subscribe = UserSubscription.objects.filter(
+                subscriber=viewer, is_active=True
+            ).values_list('subscribed_to_id', flat=True)
             target_qs = target_qs.filter(
                 Q(privacy='public') |
-                Q(privacy='followers', user_id__in=mutual_ids)
+                Q(privacy='followers', user_id__in=authors_i_follow) |
+                Q(privacy='subscribers', user_id__in=authors_i_subscribe)
             )
         else:
             target_qs = target_qs.filter(privacy='public')
 
         return target_qs.exclude(id__in=exclude_ids).order_by("-created_at")[:limit]
-
-
-class UserVideosBatchApiView(APIView):
-    """
-    Prefetch de videos por lote de usuarios.
-    POST /api/videos/user/prefetch/
-    body: { users: [{username, exclude_id}], limit: 2 }
-    response: { username: [videos], ... }
-    """
-    permission_classes = [IsAuthenticated]
-
-    def post(self, request, *args, **kwargs):
-        users = request.data.get("users", [])
-        limit = min(int(request.data.get("limit", 2)), 10)
-        result = {}
-        for entry in users:
-            username = entry.get("username")
-            exclude_id = entry.get("exclude_id")
-            if not username:
-                continue
-            qs = (
-                Video.objects.filter(user_id__username=username, status="ready")
-                .exclude(id=exclude_id)
-                .order_by("-created_at")[:limit]
-            )
-            serializer = VideoZerializer(qs, many=True, context={"request": request})
-            result[username] = serializer.data
-        return Response(result, status=status.HTTP_200_OK)
 
 
 class CreateViewApiView(APIView):
@@ -334,21 +334,21 @@ class VideoEventView(APIView):
         except Video.DoesNotExist:
             return Response({'error': 'Video no encontrado.'}, status=status.HTTP_404_NOT_FOUND)
 
-        # --- video_view_valid: 1 hora cooldown vía tabla View ---
+        # --- video_view_valid: UNA sola vista por usuario por video (para siempre) ---
         if event_type == 'video_view_valid':
-            cutoff = timezone.now() - timedelta(hours=1)
-            already_viewed = View.objects.filter(
+            # get_or_create garantiza una única fila View por (usuario, video).
+            # Si el usuario ya vio el video antes, no se crea otra y no se vuelve
+            # a contar — el conteo de vistas = usuarios únicos que lo vieron.
+            _view, created = View.objects.get_or_create(
                 user_id=request.user,
                 video_id=video,
-                created_at__gte=cutoff
-            ).exists()
-            if already_viewed:
-                return Response({'message': 'Vista ya registrada en la última hora.'}, status=status.HTTP_200_OK)
-
-            view_obj, created = View.objects.get_or_create(
-                user_id=request.user,
-                video_id=video
             )
+            if not created:
+                return Response({'message': 'Vista ya registrada por este usuario.'}, status=status.HTTP_200_OK)
+            # Marcar como visto en Redis para el algoritmo de recomendaciones
+            record_video_view(request.user.id, video.id)
+            if video.category_id:
+                update_user_interests(request.user.id, video.category_id, 'view')
             if created:
                 ws_data = {
                     'event': 'new_view',
@@ -394,8 +394,12 @@ class CreateCommentApiView(APIView):
         video_id = request.data.get("video_id")
         if not video_id:
             return Response({"error": "video_id is required"}, status=status.HTTP_400_BAD_REQUEST)
-        
-        video = get_object_or_404(Video, id=video_id)
+
+        # El frontend puede mandar el id numérico o el uuid del video: aceptamos ambos.
+        if str(video_id).isdigit():
+            video = get_object_or_404(Video, id=video_id)
+        else:
+            video = get_object_or_404(Video, uuid=video_id)
         video_owner = video.user_id
         
         # Check subscription limits for this relationship
@@ -423,7 +427,12 @@ class CreateCommentApiView(APIView):
             print(f"Error checking comment subscription: {e}")
             pass
 
-        validate_data = self.serializer_class(data=request.data, context={"request": request})
+        # El video ya quedó resuelto arriba (por id o uuid) e inyectado en el save.
+        # Quitamos video_id del payload para que el serializer no intente revalidarlo
+        # como FK (fallaría si llegó un uuid en vez de un pk numérico).
+        serializer_data = request.data.copy()
+        serializer_data.pop("video_id", None)
+        validate_data = self.serializer_class(data=serializer_data, context={"request": request})
 
         if validate_data.is_valid():
             # Obtener parent si viene
@@ -478,8 +487,10 @@ class CreateCommentApiView(APIView):
                         status=status.HTTP_400_BAD_REQUEST
                     )
 
-            # Crear el comentario
+            # Crear el comentario. Pasamos el objeto Video ya resuelto (por id o
+            # uuid) para que el FK no dependa de cómo el frontend mandó el video_id.
             comment = validate_data.save(
+                video_id=video,
                 user_id=request.user,
                 is_priority_comment=priority_comment_enabled,
                 priority_plan_name=priority_plan_name,
@@ -636,7 +647,7 @@ class CreateFollowerApiView(APIView):
             ).exists()
 
             if followed:
-                Follower.objects.get(
+                Follower.objects.filter(
                     user_id=request.user,
                     follower_user_id=serialized_data.validated_data['follower_user_id']
                 ).delete()
@@ -675,6 +686,14 @@ class CreateFollowerApiView(APIView):
                 notification_type=Notification.Type.FOLLOW,
             )
 
+            # Early Creator Bonus: el usuario SEGUIDO (followed_user) es quien gana
+            # un seguidor. Nunca debe romper el follow si algo falla.
+            try:
+                from apps.wallet.services import try_enroll_creator_bonuses
+                try_enroll_creator_bonuses(followed_user)
+            except Exception as e:
+                print("[bonus] enrollment hook error:", e)
+
             chat_room = ChatRoom.objects.filter(participant1=followed_user, participant2=request.user)
             return Response(
                 {"message": "Seguiendo correctamente", "data": serialized_data.data, "chat_uuid": chat_room[0].uuid if len(chat_room) > 0 else ""},
@@ -693,7 +712,7 @@ class FollowersListView(APIView):
     def get(self, request, username):
         target_user = get_object_or_404(User, username=username)
         # People who follow target_user: follower_user_id = target_user
-        followers = Follower.objects.filter(follower_user_id=target_user).select_related('user_id')
+        followers = Follower.objects.filter(follower_user_id=target_user).select_related('user_id').order_by('user_id').distinct('user_id')
         
         serializer = FollowerListSerializer(
             followers, 
@@ -708,7 +727,7 @@ class FollowingListView(APIView):
     def get(self, request, username):
         target_user = get_object_or_404(User, username=username)
         # People target_user follows: user_id = target_user
-        following = Follower.objects.filter(user_id=target_user).select_related('follower_user_id')
+        following = Follower.objects.filter(user_id=target_user).select_related('follower_user_id').order_by('follower_user_id').distinct('follower_user_id')
         
         serializer = FollowerListSerializer(
             following, 
@@ -725,8 +744,9 @@ class CreateStoryApiView(APIView):
         text = request.data.get("text")
         files = request.FILES.getlist("video")
         
-        # Extracción de campos de audio
-        audio_track_url = request.data.get("audio_track_url")
+        # Extracción de campos de audio. La URL viene firmada desde el selector →
+        # normalizar a ruta cruda para guardarla (la firma se regenera al servir).
+        audio_track_url = _normalize_audio_track_url(request.data.get("audio_track_url"))
         audio_track_title = request.data.get("audio_track_title")
         audio_track_artist = request.data.get("audio_track_artist")
         audio_volume_music = request.data.get("audio_volume_music")
@@ -734,6 +754,10 @@ class CreateStoryApiView(APIView):
         audio_trim_end = request.data.get("audio_trim_end")
         filter_css = request.data.get("filter_css")
         location = request.data.get("location", "").strip() or None
+        _privacy_raw = request.data.get("privacy", Story.PRIVACY_PUBLIC)
+        privacy = _privacy_raw if _privacy_raw in (
+            Story.PRIVACY_PUBLIC, Story.PRIVACY_SUBSCRIBERS
+        ) else Story.PRIVACY_PUBLIC
         text_layers_raw = request.data.get("text_layers", "[]")
         sticker_layers_raw = request.data.get("sticker_layers", "[]")
 
@@ -768,6 +792,7 @@ class CreateStoryApiView(APIView):
         # Primero creamos la historia
         story_kwargs = dict(
             user=request.user,
+            privacy=privacy,
             text=text,
             audio_track_url=audio_track_url if audio_track_url else None,
             audio_track_title=audio_track_title,
@@ -787,6 +812,7 @@ class CreateStoryApiView(APIView):
         except ProgrammingError:
             used_legacy_story_schema = True
             legacy_kwargs = dict(story_kwargs)
+            legacy_kwargs.pop("privacy", None)
             legacy_kwargs.pop("filter_css", None)
             legacy_kwargs.pop("text_layers", None)
             legacy_kwargs.pop("sticker_layers", None)
@@ -888,19 +914,35 @@ class ListActiveStoriesApiView(APIView):
         cutoff = timezone.now() - timedelta(hours=24)
 
         followed_user_ids = Follower.objects.filter(
-            user_id=user 
+            user_id=user
         ).values_list('follower_user_id__id', flat=True)
 
         followed_user_ids = list(set(followed_user_ids))
 
-        # 2. Filtrar stories: TUYA + de los que sigues
+        # Autores a quienes el viewer está suscrito activamente — para historias
+        # de privacidad 'subscribers'.
+        from apps.subscriptions.models import UserSubscription
+        subscribed_to_ids = list(
+            UserSubscription.objects.filter(subscriber=user, is_active=True)
+            .values_list('subscribed_to_id', flat=True)
+        )
+
+        # 2. Filtrar stories: TUYA + de los que sigues.
+        #    Las 'public' las ven todos los seguidores; las 'subscribers' solo
+        #    quien esté suscrito al autor (o el propio autor).
+        visibility_q = (
+            Q(privacy=Story.PRIVACY_PUBLIC) |
+            Q(privacy=Story.PRIVACY_SUBSCRIBERS, user_id__in=subscribed_to_ids) |
+            Q(user_id=user)  # el dueño siempre ve las suyas
+        )
         stories = Story.objects.filter(
             Q(user_id__in=followed_user_ids) | Q(user_id=user),  # ← tú + seguidos
+            visibility_q,
             is_active=True,
             created_at__gte=cutoff
         ).select_related('user') \
          .prefetch_related('media') \
-         .order_by('-created_at') 
+         .order_by('-created_at')
 
         # 3. (Opcional pero PRO) → Ordenar para que tu story siempre aparezca PRIMERO
         story_list = list(stories)
@@ -923,6 +965,19 @@ class UserStoriesApiView(APIView):
         # Re-query to get only the ones still active (non-expired)
         story_ids = [s.id for s in stories]
         active_stories = Story.objects.filter(id__in=story_ids, is_active=True)
+
+        # Las historias 'subscribers' solo las ve el dueño o un suscriptor activo.
+        viewer = request.user
+        is_owner = viewer.is_authenticated and str(viewer.id) == str(user_id)
+        if not is_owner:
+            allowed = Q(privacy=Story.PRIVACY_PUBLIC)
+            if viewer.is_authenticated:
+                from apps.subscriptions.models import UserSubscription
+                if UserSubscription.objects.filter(
+                    subscriber=viewer, subscribed_to_id=user_id, is_active=True
+                ).exists():
+                    allowed |= Q(privacy=Story.PRIVACY_SUBSCRIBERS)
+            active_stories = active_stories.filter(allowed)
 
         serializer = self.serializer_class(active_stories, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
@@ -1013,6 +1068,42 @@ class DeleteStoryApiView(APIView):
             pass
 
         return Response({"message": "Historia eliminada"}, status=200)
+
+
+class StoryDetailByMediaApiView(APIView):
+    """
+    Devuelve la Story COMPLETA (capas, stickers, filtro, audio, media) a partir
+    de un identificador de StoryMedia. Lo usa el chat: cuando se responde a una
+    historia, el mensaje solo guarda el id del StoryMedia; al hacer click se
+    recupera aquí la historia entera para mostrarla con todo lo que se le agregó.
+
+    `media_ref` puede ser el id numérico o el uuid del StoryMedia.
+    Responde 404 con 'Historia no disponible' si no existe o ya expiró (>24h).
+    """
+    permission_classes = [IsAuthenticated]
+    serializer_class = StorySerializer
+
+    def get(self, request, media_ref, *args, **kwargs):
+        # Resolver el StoryMedia por id numérico o por uuid
+        story_media = None
+        if str(media_ref).isdigit():
+            story_media = StoryMedia.objects.select_related("story", "story__user").filter(
+                id=int(media_ref)
+            ).first()
+        if story_media is None:
+            story_media = StoryMedia.objects.select_related("story", "story__user").filter(
+                uuid=str(media_ref)
+            ).first()
+
+        if story_media is None:
+            return Response({"detail": "Historia no disponible"}, status=status.HTTP_404_NOT_FOUND)
+
+        story = story_media.story
+        if not story or not story.is_active or story.has_expired():
+            return Response({"detail": "Historia no disponible"}, status=status.HTTP_404_NOT_FOUND)
+
+        serializer = self.serializer_class(story, context={"request": request})
+        return Response(serializer.data, status=status.HTTP_200_OK)
 
 
 class ReportStoryApiView(APIView):
@@ -1117,6 +1208,15 @@ class CreateGiftStoryView(APIView):
             gift_type=gift_type
         )
 
+        # Notificación (campanita + push) para quien recibe el regalo en su historia
+        _gift_label = f"{gift_obj.name} {gift_obj.emoji or ''}".strip()
+        create_and_broadcast_notification(
+            recipient=story_media.story.user,
+            actor=request.user,
+            notification_type=Notification.Type.GIFT,
+            message=f"@{request.user.username} te envió un regalo: {_gift_label}",
+        )
+
         # 4. Websocket data
         ws_data = {
             "event": "gift_received",
@@ -1218,6 +1318,16 @@ class CreateGiftVideoView(APIView):
             gift=gift_obj,
             gift_type=gift_type,
             vip_message=vip_message
+        )
+
+        # Notificación (campanita + push) para el dueño del video
+        _gift_label = f"{gift_obj.name} {gift_obj.emoji or ''}".strip()
+        create_and_broadcast_notification(
+            recipient=video.user_id,
+            actor=request.user,
+            notification_type=Notification.Type.GIFT,
+            video=video,
+            message=f"@{request.user.username} te envió un regalo: {_gift_label}",
         )
 
         # 4. WebSocket notification
@@ -1365,8 +1475,10 @@ class MarkVideoGiftsSeenView(APIView):
             return Response({'status': 'ok'})
 
         gs = GlobalSettings.get_settings()
-        fee = int(gift.gift.token_price * gs.gift_fee_pct / 100)
-        receiver_tokens = int(gift.gift.token_price) - fee
+        # Early Creator Bonus: si el receptor tiene un bono activo, usa su comisión.
+        _bonus = CreatorBonus.active_for(request.user)
+        _fee_override = _bonus.gift_fee_pct if _bonus else None
+        fee, receiver_tokens = gs.split_gift_tokens(gift.gift.token_price, fee_pct_override=_fee_override)
         if receiver_tokens > 0:
             receiver_wallet, _ = WalletModel.objects.get_or_create(
                 user=request.user, defaults={'wallet_type': 'main'}
@@ -1430,6 +1542,15 @@ class CreateGiftUserView(APIView):
             vip_message=vip_message
         )
 
+        # Notificación (campanita + push) para quien recibe el regalo de usuario
+        _gift_label = f"{gift_obj.name} {gift_obj.emoji or ''}".strip()
+        create_and_broadcast_notification(
+            recipient=recipient,
+            actor=request.user,
+            notification_type=Notification.Type.GIFT,
+            message=f"@{request.user.username} te envió un regalo: {_gift_label}",
+        )
+
         ws_data = {
             "event": "user_gift_received",
             "gift_uuid": gift.uuid,
@@ -1490,8 +1611,10 @@ class MarkUserGiftsSeenView(APIView):
             return Response({'status': 'ok'})
 
         gs = GlobalSettings.get_settings()
-        fee = int(gift.gift.token_price * gs.gift_fee_pct / 100)
-        receiver_tokens = int(gift.gift.token_price) - fee
+        # Early Creator Bonus: si el receptor tiene un bono activo, usa su comisión.
+        _bonus = CreatorBonus.active_for(request.user)
+        _fee_override = _bonus.gift_fee_pct if _bonus else None
+        fee, receiver_tokens = gs.split_gift_tokens(gift.gift.token_price, fee_pct_override=_fee_override)
         if receiver_tokens > 0:
             receiver_wallet, _ = WalletModel.objects.get_or_create(
                 user=request.user, defaults={'wallet_type': 'main'}
@@ -1519,8 +1642,10 @@ class MarkStoryGiftSeenView(APIView):
             return Response({'status': 'ok'})
 
         gs = GlobalSettings.get_settings()
-        fee = int(gift.gift.token_price * gs.gift_fee_pct / 100)
-        receiver_tokens = int(gift.gift.token_price) - fee
+        # Early Creator Bonus: si el receptor tiene un bono activo, usa su comisión.
+        _bonus = CreatorBonus.active_for(request.user)
+        _fee_override = _bonus.gift_fee_pct if _bonus else None
+        fee, receiver_tokens = gs.split_gift_tokens(gift.gift.token_price, fee_pct_override=_fee_override)
 
         if receiver_tokens > 0:
             receiver_wallet, _ = WalletModel.objects.get_or_create(
@@ -1725,7 +1850,9 @@ class SendMessageView(APIView):
             print("Error enviando mensaje al WebSocket:", e)
             # No fallar la API si el WS falla
 
-        # Push notification so recipient sees the message when the app is closed
+        # Push notification so recipient sees the message when the app is closed.
+        # Respeta la preferencia de sonido de mensajes: la notificación llega
+        # igual, pero va sin sonido si el usuario silenció los mensajes.
         try:
             preview = content[:60] if content else "📎 Multimedia"
             send_push_notification(
@@ -1733,6 +1860,7 @@ class SendMessageView(APIView):
                 title=request.user.username,
                 body=preview,
                 data={"type": "new_message", "chat_uuid": str(chat.uuid), "sender_id": str(request.user.id)},
+                play_sound=getattr(recipient, "notif_sound_messages", True),
             )
         except Exception as e:
             print(f"[push] message notification failed: {e}")
@@ -1997,38 +2125,6 @@ class MarkMessagesReadView(APIView):
         return Response({"status": "ok", "marked": updated})
 
 
-class SaveMessageReactionView(APIView):
-    """
-    Called internally by BuzzySocket to persist a message reaction.
-    POST body: { message_uuid, user_id, emoji }
-    If reaction already exists → delete it (toggle). Else → create it.
-    """
-    permission_classes = []  # Internal endpoint – BuzzySocket calls without user session
-
-    def post(self, request):
-        message_uuid = request.data.get("message_uuid")
-        user_id = request.data.get("user_id")
-        emoji = request.data.get("emoji")
-
-        if not all([message_uuid, user_id, emoji]):
-            return Response({"error": "message_uuid, user_id, emoji are required"}, status=400)
-
-        try:
-            message = Message.objects.get(uuid=message_uuid)
-            user = User.objects.get(id=user_id)
-        except (Message.DoesNotExist, User.DoesNotExist):
-            return Response({"error": "Message or user not found"}, status=404)
-
-        reaction, created = MessageReaction.objects.get_or_create(
-            message=message, user=user, reaction=emoji
-        )
-        if not created:
-            # Toggle: already reacted → remove
-            reaction.delete()
-            return Response({"action": "removed", "username": user.username}, status=200)
-
-        return Response({"action": "added", "username": user.username}, status=201)
-
 class UserSuggestionsView(APIView):
     """
     Algoritmo de Sugerencias de Usuarios (Recomendación)
@@ -2127,6 +2223,12 @@ class VideoUploadAPIView(APIView):
 
         # Audio mixing params (optional)
         audio_track_url = request.data.get('audio_url') or None
+        # El cliente manda la URL de la pista tal como la recibió del selector, que
+        # AHORA viene FIRMADA (/media-signed/audio_tracks/...?expires=&sig=). NO debe
+        # guardarse firmada: la firma vence en horas y get_audio_track_url re-firma en
+        # cada respuesta del feed. Normalizamos a la ruta cruda de storage para que el
+        # serializer la firme fresca cada vez (y no anide /media-signed/media-signed/).
+        audio_track_url = _normalize_audio_track_url(audio_track_url)
         try:
             volume_original = float(request.data.get('volume_original', 1.0))
             volume_music    = float(request.data.get('volume_music',    0.8))
@@ -2148,7 +2250,8 @@ class VideoUploadAPIView(APIView):
 
         _privacy_raw = request.data.get('privacy', Video.PRIVACY_PUBLIC)
         privacy = _privacy_raw if _privacy_raw in (
-            Video.PRIVACY_PUBLIC, Video.PRIVACY_FOLLOWERS, Video.PRIVACY_PRIVATE
+            Video.PRIVACY_PUBLIC, Video.PRIVACY_FOLLOWERS,
+            Video.PRIVACY_SUBSCRIBERS, Video.PRIVACY_PRIVATE
         ) else Video.PRIVACY_PUBLIC
 
         if not video_file:
@@ -2344,6 +2447,10 @@ def create_and_broadcast_notification(
     except Exception as e:
         print(f"[notification] WS broadcast failed: {e}")
 
+    # Respetar la preferencia de SONIDO por categoría: la notificación llega
+    # igual, pero si el usuario silenció esa categoría, el push va sin sonido.
+    play_sound = _push_sound_enabled(recipient, notification_type)
+
     try:
         send_push_notification(
             user=recipient,
@@ -2354,9 +2461,61 @@ def create_and_broadcast_notification(
                 "actor_username": actor.username,
                 "video_uuid": str(video.uuid) if video else "",
             },
+            play_sound=play_sound,
         )
     except Exception as e:
         print(f"[push] notification failed: {e}")
+
+
+def _push_sound_enabled(user, notification_type: str) -> bool:
+    """Whether the push for this notification type should play a sound, based on
+    the recipient's per-category sound preferences. Unknown types default to on."""
+    if notification_type == Notification.Type.GIFT:
+        return getattr(user, "notif_sound_gifts", True)
+    if notification_type == Notification.Type.FOLLOW:
+        return getattr(user, "notif_sound_followers", True)
+    return True
+
+
+def notify_system(recipient, message: str, notification_type=Notification.Type.EARNING,
+                  title: str = "Buzzy"):
+    """Notificación generada por el SISTEMA (sin actor), p.ej. ganar un bono.
+    Persiste la Notification, la emite por WS y manda push. Fire-and-forget."""
+    notif = Notification.objects.create(
+        recipient=recipient,
+        actor=None,
+        notification_type=notification_type,
+        message=message,
+    )
+    payload = {
+        "event": "notification",
+        "id": notif.id,
+        "notification_type": notification_type,
+        "message": message,
+        "actor": None,
+        "video_uuid": None,
+        "video_thumbnail": None,
+        "created_at": notif.created_at.isoformat(),
+        "is_read": False,
+    }
+    try:
+        requests.post(
+            f"{settings.FASTAPI_WS_URL}/broadcast-notification/",
+            json={"recipient_id": recipient.id, **payload},
+            headers=_ws_headers(),
+            timeout=2,
+        )
+    except Exception as e:
+        print(f"[notification] WS system broadcast failed: {e}")
+    try:
+        send_push_notification(
+            user=recipient,
+            title=title,
+            body=message,
+            data={"type": notification_type},
+        )
+    except Exception as e:
+        print(f"[push] system notification failed: {e}")
 
 
 # ─── Notification API Views ──────────────────────────────────────────────────

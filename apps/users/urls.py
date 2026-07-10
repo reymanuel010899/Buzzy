@@ -52,4 +52,7 @@ urlpatterns = [
 
     # FCM Device Registration
     path('api/auth/register-device/', views.RegisterDeviceView.as_view(), name='register-device'),
+
+    # Per-category notification SOUND preferences (messages/gifts/followers)
+    path('api/notifications/sound-prefs/', views.NotificationSoundPrefsView.as_view(), name='notif-sound-prefs'),
 ]

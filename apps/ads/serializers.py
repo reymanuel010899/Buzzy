@@ -2,6 +2,57 @@ from rest_framework import serializers
 from .models import AdCampaign, AdAudience, AdCreative, AdBudget, AdAnalytics, AdReview
 
 
+def build_promoted_content(video, request=None):
+    """
+    Payload compacto y estable de un video promocionado (boost), para que el
+    frontend lo renderice como un item de feed con badge 'Patrocinado'.
+
+    Se mantiene desacoplado del VideoZerializer (pesado, con likes/follows) a
+    propósito: aquí solo viaja lo necesario para reproducir el video y atribuir
+    al autor. Si en el futuro se necesita más, se extiende este único lugar.
+    """
+    if video is None:
+        return None
+
+    def _abs(url):
+        if url and request is not None and not str(url).startswith(('http://', 'https://')):
+            return request.build_absolute_uri(url)
+        return url
+
+    video_url = video.video_url or (_abs(video.video.url) if getattr(video, 'video', None) else None)
+
+    author = getattr(video, 'user_id', None)
+    author_data = None
+    if author is not None:
+        pic = getattr(author, 'profile_picture', None)
+        # ¿El viewer ya sigue a este autor? Misma fórmula que el feed
+        # (Follower.follower_user_id = seguido, user_id = quien sigue).
+        is_following = False
+        viewer = getattr(request, 'user', None) if request is not None else None
+        if viewer is not None and getattr(viewer, 'is_authenticated', False):
+            from apps.videos.models import Follower
+            is_following = Follower.objects.filter(
+                follower_user_id=author, user_id=viewer
+            ).exists()
+        author_data = {
+            'id': author.id,
+            'username': getattr(author, 'username', None),
+            'profile_picture': _abs(pic.url) if pic else None,
+            'is_following': is_following,
+        }
+
+    return {
+        'video_id': video.id,
+        'video_uuid': video.uuid,
+        'media_type': video.media_type,
+        'video_url': _abs(video_url),
+        'thumbnail_url': _abs(video.thumbnail_url),
+        'description': video.description or '',
+        'duration': video.duration,
+        'author': author_data,
+    }
+
+
 class AdAudienceSerializer(serializers.ModelSerializer):
     class Meta:
         model  = AdAudience
@@ -89,6 +140,13 @@ class AdCampaignSerializer(serializers.ModelSerializer):
     cpc               = serializers.SerializerMethodField()
     spent_pct         = serializers.SerializerMethodField()
 
+    # ── Boost de video propio ──────────────────────────────────────
+    # Entrada: el frontend manda el uuid del video a promocionar.
+    # Salida: is_boost + el payload del video para renderizarlo en el feed.
+    promoted_video_uuid = serializers.CharField(write_only=True, required=False, allow_blank=True)
+    is_boost            = serializers.BooleanField(read_only=True)
+    promoted_content    = serializers.SerializerMethodField()
+
     class Meta:
         model  = AdCampaign
         fields = [
@@ -97,8 +155,49 @@ class AdCampaignSerializer(serializers.ModelSerializer):
             'audience', 'creative', 'budget', 'analytics', 'review',
             'total_reach', 'total_impressions', 'total_clicks',
             'ctr', 'cpm', 'cpc', 'spent_pct',
+            'promoted_video_uuid', 'is_boost', 'promoted_content',
         ]
         read_only_fields = ['user', 'created_at', 'updated_at']
+
+    def get_promoted_content(self, obj):
+        if not obj.promoted_video_id:
+            return None
+        return build_promoted_content(obj.promoted_video, request=self.context.get('request'))
+
+    def validate_promoted_video_uuid(self, value):
+        """Resuelve el uuid a un Video, exigiendo que sea del usuario y publicable."""
+        if not value:
+            return None
+        from apps.videos.models import Video
+        request = self.context.get('request')
+        try:
+            video = Video.objects.get(uuid=value)
+        except Video.DoesNotExist:
+            raise serializers.ValidationError("El video a promocionar no existe.")
+        if request and video.user_id_id != request.user.id:
+            raise serializers.ValidationError("Solo puedes promocionar tus propios videos.")
+        if video.status != 'ready':
+            raise serializers.ValidationError("El video aún no está listo para promocionarse.")
+        if video.privacy != video.PRIVACY_PUBLIC:
+            raise serializers.ValidationError("Solo se pueden promocionar videos públicos.")
+        return video
+
+    def validate(self, attrs):
+        """
+        Garantiza la coherencia del creative:
+        - Boost (con promoted_video_uuid): NO necesita creative externo.
+        - Anuncio externo (sin boost) recién creado: necesita creative con media.
+        """
+        is_create = self.instance is None
+        is_boost  = bool(attrs.get('promoted_video_uuid'))
+        creative  = attrs.get('creative')
+
+        if is_create and not is_boost:
+            if not creative or not creative.get('media_file'):
+                raise serializers.ValidationError(
+                    {'creative': "Un anuncio externo requiere un creative con archivo de medios."}
+                )
+        return attrs
 
     def get_total_reach(self, obj):
         from .models import AdImpression
@@ -140,6 +239,14 @@ class AdCampaignSerializer(serializers.ModelSerializer):
         audience_data = validated_data.pop('audience', None)
         creative_data = validated_data.pop('creative', None)
         budget_data   = validated_data.pop('budget', None)
+
+        # Boost: el validator ya resolvió el uuid a un objeto Video (o None).
+        promoted_video = validated_data.pop('promoted_video_uuid', None)
+        if promoted_video is not None:
+            validated_data['promoted_video'] = promoted_video
+            # Un boost de contenido se cobra por impresión: forzamos CPM.
+            if budget_data:
+                budget_data['bidding_model'] = 'CPM'
 
         # Auto dates
         if not validated_data.get('start_date'):

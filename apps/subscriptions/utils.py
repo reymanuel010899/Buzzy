@@ -121,10 +121,15 @@ def send_call_push_notification(receiver, payload):
     sent_any = any(r["sent"] for r in results)
     return {"sent": sent_any, "provider": "firebase_v1", "results": results}
 
-def send_push_notification(user, title: str, body: str, data: dict = None):
+def send_push_notification(user, title: str, body: str, data: dict = None, play_sound: bool = True):
     """
     Sends a push notification to all FCM devices registered for a user.
     Uses the same Firebase Admin SDK already initialized for call notifications.
+
+    `play_sound=False` delivers a SILENT push: the notification still shows in the
+    tray, but no sound plays (used when the user disabled the sound for that
+    category in their notification preferences).
+
     Returns a list of results (one per device token).
     """
     if not messaging:
@@ -135,6 +140,12 @@ def send_push_notification(user, title: str, body: str, data: dict = None):
     if not tokens:
         return [{"sent": False, "reason": "no_device_tokens"}]
 
+    # Android: omit the sound field to stay silent. iOS: sound=None / empty string.
+    android_notification = messaging.AndroidNotification(
+        sound="default" if play_sound else None,
+    )
+    aps_sound = "default" if play_sound else None
+
     data_payload = {k: str(v) for k, v in (data or {}).items()}
     results = []
     for token in tokens:
@@ -143,9 +154,9 @@ def send_push_notification(user, title: str, body: str, data: dict = None):
                 token=token,
                 notification=messaging.Notification(title=title, body=body),
                 data=data_payload,
-                android=messaging.AndroidConfig(priority="high"),
+                android=messaging.AndroidConfig(priority="high", notification=android_notification),
                 apns=messaging.APNSConfig(
-                    payload=messaging.APNSPayload(aps=messaging.Aps(sound="default"))
+                    payload=messaging.APNSPayload(aps=messaging.Aps(sound=aps_sound))
                 ),
             )
             response = messaging.send(message)

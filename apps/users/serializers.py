@@ -13,6 +13,7 @@ class DetailedUserSerializer(serializers.ModelSerializer):
     is_following = serializers.SerializerMethodField(read_only=True)
     subscribers_count = serializers.SerializerMethodField(read_only=True)
     subscription_status = serializers.SerializerMethodField(read_only=True)
+    am_i_subscribed = serializers.SerializerMethodField(read_only=True)
     has_active_stories = serializers.SerializerMethodField(read_only=True)
     profile_picture = serializers.SerializerMethodField(read_only=True)
     chat_security = serializers.SerializerMethodField(read_only=True)
@@ -20,7 +21,7 @@ class DetailedUserSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = models.User
-        fields = ('id','username', 'first_name', 'email', 'bio', 'profile_picture', 'profile_video', 'like_all_count', 'comments_all_count', 'view_all_acount', 'follower_all_acount', 'total_social_followers', 'followed_all_acount', 'is_following', 'subscribers_count', 'subscription_status', 'has_active_stories', 'chat_security', 'is_buzzy_premium', 'is_owner')
+        fields = ('id','username', 'first_name', 'email', 'bio', 'profile_picture', 'profile_video', 'like_all_count', 'comments_all_count', 'view_all_acount', 'follower_all_acount', 'total_social_followers', 'followed_all_acount', 'is_following', 'subscribers_count', 'subscription_status', 'am_i_subscribed', 'has_active_stories', 'chat_security', 'is_buzzy_premium', 'is_owner', 'onboarding_completed')
 
     def get_profile_picture(self, obj):
 
@@ -52,6 +53,18 @@ class DetailedUserSerializer(serializers.ModelSerializer):
         if subscription:
             return UserSubscriptionSerializer(subscription).data
         return None
+
+    def get_am_i_subscribed(self, obj):
+        """¿El viewer está suscrito activamente a ESTE perfil? (dirección única).
+        Se usa para mostrar la pestaña 'Suscriptores' solo si corresponde."""
+        request = self.context.get('request')
+        if not request or not request.user.is_authenticated:
+            return False
+        if request.user.id == obj.id:
+            return True  # el dueño siempre puede ver su propia sección
+        return UserSubscription.objects.filter(
+            subscriber=request.user, subscribed_to=obj, is_active=True
+        ).exists()
 
     def get_is_following(self, obj):
         request = self.context.get('request')
