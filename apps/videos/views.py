@@ -7,6 +7,7 @@ from apps.subscriptions.models import UserSubscription
 from apps.subscriptions.utils import send_push_notification
 from apps.recommendations.services import record_video_view, update_user_interests
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 from datetime import timedelta
 from django.core.signing import BadSignature, SignatureExpired, TimestampSigner
 from rest_framework.response import Response
@@ -1715,8 +1716,47 @@ class ChatListView(APIView):
 class ChatMessagesView(APIView):
     permission_classes = [IsAuthenticated]
 
+    @staticmethod
+    def _parse_cursor(raw, allow_bare_ts=False):
+        """Parsea un cursor compuesto '<created_at ISO>|<id>'.
+
+        Devuelve una tupla (timestamp, id) o None si el cursor es inválido.
+        Si allow_bare_ts es True, acepta también un timestamp ISO sin '|id'
+        y lo trata como (ts, 0).
+        """
+        if allow_bare_ts and '|' not in raw:
+            ts = parse_datetime(raw)
+            if ts is None:
+                return None
+            if timezone.is_naive(ts):
+                ts = timezone.make_aware(ts)
+            return ts, 0
+
+        parts = raw.split('|')
+        if len(parts) != 2:
+            return None
+
+        ts = parse_datetime(parts[0])
+        if ts is None:
+            return None
+        if timezone.is_naive(ts):
+            ts = timezone.make_aware(ts)
+
+        try:
+            cursor_id = int(parts[1])
+        except (TypeError, ValueError):
+            return None
+
+        return ts, cursor_id
+
     def get(self, request, chat_uuid):
-        """Devuelve todos los mensajes de un chat específico"""
+        """Devuelve los mensajes de un chat específico.
+
+        Sin parámetros de paginación devuelve el historial completo
+        (comportamiento original, requerido por clientes antiguos).
+        Con `limit` y/o `before` activa la paginación por cursor hacia atrás.
+        Con `after` devuelve los mensajes más nuevos que el cursor (resync).
+        """
         chat = get_object_or_404(ChatRoom, uuid=chat_uuid)
 
         # Verificar que el usuario pertenece al chat
@@ -1731,13 +1771,89 @@ class ChatMessagesView(APIView):
         # Marcar mensajes como leídos
         chat.reset_unread_count(request.user)
 
-        messages = chat.messages.filter(is_deleted=False).select_related('sender').order_by('created_at')
+        limit_param = request.query_params.get('limit')
+        before_param = request.query_params.get('before')
+        after_param = request.query_params.get('after')
+
+        bad_request = Response({"error": "parámetro inválido"}, status=status.HTTP_400_BAD_REQUEST)
+
+        # `before` y `after` son mutuamente excluyentes
+        if before_param is not None and after_param is not None:
+            return bad_request
+
+        limit = None
+        if limit_param is not None:
+            try:
+                limit = int(limit_param)
+            except (TypeError, ValueError):
+                return bad_request
+            # Acotar a [1, 100]
+            limit = max(1, min(limit, 100))
+
+        base_qs = chat.messages.filter(is_deleted=False).select_related('sender')
+
+        has_more = False
+        next_cursor = None
+
+        if after_param is not None:
+            # Resync: mensajes estrictamente más nuevos que el cursor, ascendente
+            cursor = self._parse_cursor(after_param, allow_bare_ts=True)
+            if cursor is None:
+                return bad_request
+            cursor_ts, cursor_id = cursor
+            qs = base_qs.filter(
+                Q(created_at__gt=cursor_ts) | Q(created_at=cursor_ts, id__gt=cursor_id)
+            ).order_by('created_at', 'id')
+            if limit is not None:
+                # Pedimos limit+1 para saber si quedan más sin otra query
+                page = list(qs[:limit + 1])
+                has_more = len(page) > limit
+                page = page[:limit]
+            else:
+                # Sin limit explícito: todos los mensajes nuevos
+                page = list(qs)
+            if has_more and page:
+                # Cursor del mensaje más nuevo devuelto para seguir paginando hacia adelante
+                newest = page[-1]
+                next_cursor = f"{newest.created_at.isoformat()}|{newest.id}"
+            messages = page
+        elif before_param is not None or limit is not None:
+            # Paginación hacia atrás (historial)
+            qs = base_qs
+            if before_param is not None:
+                cursor = self._parse_cursor(before_param)
+                if cursor is None:
+                    return bad_request
+                cursor_ts, cursor_id = cursor
+                # Estrictamente más viejos que (cursor_ts, cursor_id)
+                qs = qs.filter(
+                    Q(created_at__lt=cursor_ts) | Q(created_at=cursor_ts, id__lt=cursor_id)
+                )
+                if limit is None:
+                    limit = 30  # límite por defecto cuando solo se envía `before`
+            # DESC para tomar los más recientes de la ventana; limit+1 detecta si hay más
+            page = list(qs.order_by('-created_at', '-id')[:limit + 1])
+            has_more = len(page) > limit
+            page = page[:limit]
+            # Invertir a ASC para mantener el orden ascendente de la respuesta actual
+            page.reverse()
+            if has_more and page:
+                # Cursor del mensaje más viejo devuelto en la página
+                oldest = page[0]
+                next_cursor = f"{oldest.created_at.isoformat()}|{oldest.id}"
+            messages = page
+        else:
+            # Sin parámetros: historial completo (compatibilidad con APKs antiguos)
+            messages = base_qs.order_by('created_at')
+
         serializer = MessageSerializer(messages, many=True, context={'request': request})
 
         return Response({
             "messages": serializer.data,
             "chat_uuid": chat.uuid,
-            "other_user": ChatRoomSerializer(chat, context={'request': request}).data['other_user']
+            "other_user": ChatRoomSerializer(chat, context={'request': request}).data['other_user'],
+            "has_more": has_more,
+            "next_cursor": next_cursor,
         }, status=status.HTTP_200_OK)
 
 
