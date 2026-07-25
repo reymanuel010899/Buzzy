@@ -11,3 +11,4 @@ media/stories/media/*.mp4
 serviceAccountKey*.json
 **/__pycache__/
 *.pyc
+db.sqlite3
