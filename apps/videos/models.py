@@ -249,11 +249,27 @@ class Category(models.Model):
 
 
 class Story(models.Model):
+    # Las historias solo las ven los seguidores. 'public' = todos los seguidores
+    # (comportamiento actual); 'subscribers' = solo suscriptores activos del autor.
+    PRIVACY_PUBLIC      = 'public'
+    PRIVACY_SUBSCRIBERS = 'subscribers'
+    PRIVACY_CHOICES = [
+        (PRIVACY_PUBLIC,      'Público'),
+        (PRIVACY_SUBSCRIBERS, 'Solo suscriptores'),
+    ]
+
     uuid = models.CharField(max_length=32, default=full_uuid, unique=True, blank=True)
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="stories")
-    
+
+    privacy = models.CharField(
+        max_length=20,
+        choices=PRIVACY_CHOICES,
+        default=PRIVACY_PUBLIC,
+        db_index=True,
+    )
+
     text = models.TextField(blank=True, null=True)
-    is_active = models.BooleanField(default=True)  
+    is_active = models.BooleanField(default=True)
 
     audio_track_url   = models.URLField(max_length=500, blank=True, null=True)
     audio_track_title = models.CharField(max_length=255, blank=True, null=True)
@@ -450,13 +466,15 @@ class Video(models.Model):
         ('blocked', 'Blocked (Unsafe)'),
     ]
 
-    PRIVACY_PUBLIC    = 'public'
-    PRIVACY_FOLLOWERS = 'followers'
-    PRIVACY_PRIVATE   = 'private'
+    PRIVACY_PUBLIC      = 'public'
+    PRIVACY_FOLLOWERS   = 'followers'
+    PRIVACY_SUBSCRIBERS = 'subscribers'
+    PRIVACY_PRIVATE     = 'private'
     PRIVACY_CHOICES = [
-        (PRIVACY_PUBLIC,    'Público'),
-        (PRIVACY_FOLLOWERS, 'Solo seguidores'),
-        (PRIVACY_PRIVATE,   'Privado'),
+        (PRIVACY_PUBLIC,      'Público'),
+        (PRIVACY_FOLLOWERS,   'Solo seguidores'),
+        (PRIVACY_SUBSCRIBERS, 'Solo suscriptores'),
+        (PRIVACY_PRIVATE,     'Privado'),
     ]
 
     uuid = models.CharField(max_length=32, default=full_uuid, unique=True, blank=True)
@@ -490,7 +508,7 @@ class Video(models.Model):
     audio_trim_end    = models.FloatField(blank=True, null=True)
 
     privacy = models.CharField(
-        max_length=10,
+        max_length=20,
         choices=PRIVACY_CHOICES,
         default=PRIVACY_PUBLIC,
         db_index=True,
@@ -559,6 +577,11 @@ class View(models.Model):
     user_id = models.ForeignKey(User, on_delete=models.CASCADE)
     video_id = models.ForeignKey(Video, on_delete=models.CASCADE, related_name='video_reverce')
     created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        # Una sola vista por usuario por video: el conteo = usuarios únicos.
+        unique_together = ('user_id', 'video_id')
+
     def __str__(self):
         return f"View {self.id} - Video {self.video_id.id}"
 
@@ -597,6 +620,9 @@ class Follower(models.Model):
     user_id = models.ForeignKey(User, related_name='following', on_delete=models.CASCADE)
     follower_user_id = models.ForeignKey(User, related_name='followers', on_delete=models.CASCADE)
     created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ('user_id', 'follower_user_id')
 
     def __str__(self):
         return f"{self.user_id.username} follow to {self.follower_user_id.username}"

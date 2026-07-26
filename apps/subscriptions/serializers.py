@@ -4,7 +4,7 @@ from .models import SubscriptionPlan, UserSubscription, SubscriptionBenefit, Cal
 class SubscriptionBenefitSerializer(serializers.ModelSerializer):
     class Meta:
         model = SubscriptionBenefit
-        fields = ['benefit_type', 'limit', 'description']
+        fields = ['benefit_type', 'limit', 'description', 'order']
 
 class SubscriptionPlanSerializer(serializers.ModelSerializer):
     benefits = SubscriptionBenefitSerializer(many=True, read_only=True)

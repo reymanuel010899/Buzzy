@@ -12,34 +12,37 @@ from .utils import get_redis_client
 
 def _privacy_filter(user) -> Q:
     """
-    Construye el filtro Q de privacidad para un usuario autenticado.
+    Construye el filtro Q de privacidad para el feed de un usuario.
 
-    Reglas:
-      - public    → siempre visible
-      - followers → visible si el viewer sigue al autor Y el autor sigue al viewer
-                    (follow mutuo = "amigos")
-      - private   → solo el propio autor
+    Reglas (feed Home):
+      - public      → siempre visible para todos.
+      - followers   → visible solo para quien sigue al autor (dirección única:
+                      viewer → autor). No requiere follow mutuo.
+      - subscribers → visible para quien tiene una suscripción activa al autor,
+                      y para el propio autor (ve los suyos en su feed).
+      - private     → NUNCA aparece en el feed, ni para el propio autor. Los
+                      privados solo se ven entrando al perfil del dueño.
     """
     if user is None or not user.is_authenticated:
         return Q(privacy=Video.PRIVACY_PUBLIC)
 
-    # IDs de usuarios que me siguen
-    followers_of_me = Follower.objects.filter(
-        follower_user_id=user
-    ).values_list('user_id_id', flat=True)
-
-    # IDs de usuarios a quienes sigo
-    i_follow = Follower.objects.filter(
+    # Autores a quienes ESTE usuario sigue (Follower.user_id = quien sigue,
+    # Follower.follower_user_id = a quién sigue).
+    authors_i_follow = Follower.objects.filter(
         user_id=user
     ).values_list('follower_user_id_id', flat=True)
 
-    # Follow mutuo: están en ambas listas
-    mutual_ids = set(followers_of_me) & set(i_follow)
+    # Autores a quienes ESTE usuario está suscrito activamente.
+    from apps.subscriptions.models import UserSubscription
+    authors_i_subscribe = UserSubscription.objects.filter(
+        subscriber=user, is_active=True
+    ).values_list('subscribed_to_id', flat=True)
 
     return (
         Q(privacy=Video.PRIVACY_PUBLIC) |
-        Q(privacy=Video.PRIVACY_FOLLOWERS, user_id__in=mutual_ids) |
-        Q(privacy=Video.PRIVACY_PRIVATE, user_id=user)
+        Q(privacy=Video.PRIVACY_FOLLOWERS, user_id__in=authors_i_follow) |
+        Q(privacy=Video.PRIVACY_SUBSCRIBERS, user_id__in=authors_i_subscribe) |
+        Q(privacy=Video.PRIVACY_SUBSCRIBERS, user_id=user)
     )
 
 # ─── Constantes del algoritmo ────────────────────────────────────────────────
@@ -216,9 +219,9 @@ class HybridFeedAPIView(APIView):
         # ── 2. Cold start — usuario nuevo ────────────────────────────────────
         if len(seen_ids) < COLD_START_THRESHOLD:
             videos = _cold_start_videos(seen_ids, user=user)
-            _mark_delivered(redis, user.id, videos)
+            # No marcar como vistos aquí — el usuario aún no los ha visto.
+            # Solo se marcan cuando el track-event registra una visualización real.
             serializer = VideoZerializer(videos, many=True, context={'request': request})
-            print("------", serializer.data)
             return Response({
                 'mode': 'cold_start',
                 'results': serializer.data,
@@ -251,10 +254,9 @@ class HybridFeedAPIView(APIView):
         if not scores:
             videos = list(base_qs.order_by('-created_at')[:FEED_PAGE_SIZE])
             if not videos:
-                # Fallback: ignorar filtro de fecha si no hay nada nuevo
+                # Fallback: ignorar seen_ids — mejor repetir contenido que mostrar nada
                 videos = list(
                     Video.objects.filter(privacy_q, status='ready', is_safe=True)
-                    .exclude(id__in=seen_ids)
                     .order_by('-created_at')[:FEED_PAGE_SIZE]
                 )
             _mark_delivered(redis, user.id, videos)
@@ -325,8 +327,70 @@ class HybridFeedAPIView(APIView):
 
         _mark_delivered(redis, user.id, final_videos)
         serializer = VideoZerializer(final_videos, many=True, context={'request': request})
-        print(serializer.data, "-------------")
         return Response({
             'mode': 'personalized',
+            'results': serializer.data,
+        })
+
+
+# ─── Feed de seguidos ──────────────────────────────────────────────────────────
+
+class FollowingFeedAPIView(APIView):
+    """
+    Feed del tab "Seguidos".
+
+    Devuelve, en orden cronológico (lo más reciente primero), los videos de las
+    cuentas que ESTE usuario sigue. A diferencia del feed híbrido NO hay scoring:
+    es un timeline puro de seguidos, como el "Following" de TikTok/Instagram.
+
+    Comparte con el híbrido el tracking de vistos (`seen:{user.id}` en Redis) y
+    el filtro de privacidad, de modo que la paginación por scroll infinito no
+    repite videos ya entregados y respeta followers/subscribers.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        user = request.user
+        redis = get_redis_client()
+
+        # ── Vistos en Redis (mismo mecanismo que el feed híbrido) ────────────
+        seen_key = f"seen:{user.id}"
+        seen_raw = redis.smembers(seen_key)
+        seen_ids = [int(x) for x in seen_raw] if seen_raw else []
+
+        # ── Autores que sigo (Follower.user_id = quien sigue) ────────────────
+        authors_i_follow = Follower.objects.filter(
+            user_id=user
+        ).values_list('follower_user_id_id', flat=True)
+
+        if not authors_i_follow:
+            return Response({'mode': 'following', 'results': []})
+
+        privacy_q = _privacy_filter(user)
+        base_qs = (
+            Video.objects
+            .filter(privacy_q, status='ready', is_safe=True, user_id__in=authors_i_follow)
+            .select_related('category', 'stats')
+        )
+
+        is_pagination = request.query_params.get('more') in ('1', 'true', 'True')
+
+        if is_pagination:
+            # PAGINACIÓN (scroll): la SIGUIENTE página = videos que aún no entregamos en
+            # esta sesión de scroll (excluye "seen"). Si ya no hay, devolvemos VACÍO =
+            # fin del feed. Sin esto, repetía los mismos → el front los deduplicaba →
+            # el scroll quedaba "trabado" hasta refrescar.
+            videos = list(base_qs.exclude(id__in=seen_ids).order_by('-created_at')[:FEED_PAGE_SIZE])
+        else:
+            # CARGA INICIAL (cambio de tab): timeline puro de seguidos, lo más reciente
+            # primero, SIN excluir "seen". Antes excluía lo ya visto en "Para ti" → el
+            # feed de seguidos llegaba con muy pocos (a veces 1) videos y no se podía
+            # scrollear. Un timeline de seguidos debe mostrar TODO lo de quienes sigues.
+            videos = list(base_qs.order_by('-created_at')[:FEED_PAGE_SIZE])
+
+        _mark_delivered(redis, user.id, videos)
+        serializer = VideoZerializer(videos, many=True, context={'request': request})
+        return Response({
+            'mode': 'following',
             'results': serializer.data,
         })

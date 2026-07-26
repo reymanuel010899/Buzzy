@@ -4,9 +4,11 @@ venv/
 venv
 secretos
 media
+
 video*.mp4
 media/stories/media/*.mp4
 *-firebase-adminsdk-*.json
 serviceAccountKey*.json
 **/__pycache__/
 *.pyc
+db.sqlite3

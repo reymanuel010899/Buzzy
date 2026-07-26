@@ -7,6 +7,7 @@ from django.core.exceptions import ValidationError
 from django.contrib.auth.hashers import make_password, check_password
 from django.db.models.signals import post_save
 from django.dispatch import receiver
+from Buzzy.encrypted_fields import EncryptedTextField
 # Create your models here.
 
 class Country(models.Model):
@@ -47,6 +48,12 @@ class User(AbstractBaseUser, PermissionsMixin):
     is_owner = models.BooleanField(default=False)
     onboarding_completed = models.BooleanField(default=False)
 
+    # Preferencias de SONIDO de notificación por categoría. La notificación visual
+    # siempre llega; estos toggles solo controlan si el push suena. True = suena.
+    notif_sound_messages  = models.BooleanField(default=True)
+    notif_sound_gifts     = models.BooleanField(default=True)
+    notif_sound_followers = models.BooleanField(default=True)
+
     # Referral pendiente: se guarda al registro y se procesa solo cuando el teléfono es verificado con Firebase
     pending_referral_code = models.CharField(max_length=64, null=True, blank=True)
 
@@ -59,10 +66,10 @@ class User(AbstractBaseUser, PermissionsMixin):
         return self.username
 
     def all_followers(self):
-        return self.followers.all()
+        return self.followers.order_by('user_id').distinct('user_id')
 
     def all_followed(self):
-        return self.following.all()
+        return self.following.order_by('follower_user_id').distinct('follower_user_id')
 
     def total_social_followers(self):
         return sum(account.followers_count for account in self.social_accounts.all())
@@ -213,9 +220,10 @@ class SocialAccount(models.Model):
     platform = models.CharField(max_length=20, choices=PLATFORM_CHOICES)
     platform_user_id = models.CharField(max_length=255)
     platform_username = models.CharField(max_length=255, blank=True)
-    # Tokens cifrados en producción — aquí TextField simple para demo local
-    access_token = models.TextField()
-    refresh_token = models.TextField(blank=True)
+    # Tokens OAuth cifrados en reposo (Fernet) vía EncryptedTextField. El código
+    # los lee/escribe como texto normal; en la BD quedan cifrados con prefijo enc::
+    access_token = EncryptedTextField()
+    refresh_token = EncryptedTextField(blank=True)
     followers_count = models.PositiveIntegerField(default=0)
     connected_at = models.DateTimeField(auto_now_add=True)
 

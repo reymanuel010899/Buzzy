@@ -27,11 +27,30 @@ class AdCampaign(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
+    # ── Boost de contenido propio ──────────────────────────────────
+    # Cuando la campaña promociona un video que el usuario ya subió, este FK
+    # apunta a ese Video y la campaña NO necesita un AdCreative externo: el
+    # video ES el creative. Si es null, la campaña es un anuncio externo
+    # clásico (con AdCreative + destination_url). SET_NULL para que borrar el
+    # video no destruya el histórico de la campaña/analytics.
+    promoted_video = models.ForeignKey(
+        'videos.Video',
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='promotions',
+        help_text="Video propio promocionado (boost). Null = anuncio externo.",
+    )
+
     # Moderation
     rejection_reason = models.TextField(blank=True, default='')
 
     def __str__(self):
         return self.name
+
+    @property
+    def is_boost(self):
+        """True si la campaña promociona un video propio en vez de un creative externo."""
+        return self.promoted_video_id is not None
 
     @property
     def is_active(self):
@@ -83,12 +102,14 @@ class AdCreative(models.Model):
         ('WATCH_VIDEO','Watch Video'),
     ]
 
+    # Para boosts de video propio no se crea AdCreative (el video es el creative),
+    # por eso los campos admiten vacío: una campaña externa los llena, un boost no.
     campaign        = models.OneToOneField(AdCampaign, on_delete=models.CASCADE, related_name='creative')
-    title           = models.CharField(max_length=255)
-    description     = models.TextField()
-    media_file      = models.FileField(upload_to='ads/media/')
+    title           = models.CharField(max_length=255, blank=True, default='')
+    description     = models.TextField(blank=True, default='')
+    media_file      = models.FileField(upload_to='ads/media/', blank=True, null=True)
     cta_text        = models.CharField(max_length=20, choices=CTA_CHOICES, default='LEARN_MORE')
-    destination_url = models.URLField()
+    destination_url = models.URLField(blank=True, default='')
 
 
 class AdBudget(models.Model):

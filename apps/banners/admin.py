@@ -158,3 +158,18 @@ class BannerInteractionAdmin(admin.ModelAdmin):
     search_fields = ('user__username', 'banner__title')
     readonly_fields = ('created_at',)
     date_hierarchy = 'created_at'
+
+
+@admin.register(GroupRequirement)
+class GroupRequirementAdmin(admin.ModelAdmin):
+    list_display = ('id', 'group', 'field', 'operator', 'value')
+    list_filter = ('group', 'operator')
+    search_fields = ('field', 'value')
+
+
+@admin.register(UserGroupMembership)
+class UserGroupMembershipAdmin(admin.ModelAdmin):
+    list_display = ('id', 'user', 'group', 'joined_at')
+    list_filter = ('group',)
+    search_fields = ('user__username', 'group__name')
+    readonly_fields = ('joined_at',)

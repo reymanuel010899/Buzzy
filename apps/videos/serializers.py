@@ -1,16 +1,53 @@
+from urllib.parse import urlparse, urlunparse
+
 from django.utils import timezone
 import datetime
 from datetime import timedelta
 from django.conf import settings as django_settings
 from rest_framework import serializers
 
+from Buzzy.media_signing import sign_media_path
+
+
+# Hostnames that only resolve on the machine that made the request. Many old rows
+# stored absolute media URLs hardcoded to one of these (e.g. audio_track_cover /
+# audio_track_url), so on a phone "localhost"/"127.0.0.1" points at the phone
+# itself and the image/audio breaks. We rewrite these to the request's host.
+_LOCAL_HOSTS = {"localhost", "127.0.0.1", "0.0.0.0"}
+
+
+def _is_local_host(hostname: str) -> bool:
+    if not hostname:
+        return False
+    if hostname in _LOCAL_HOSTS:
+        return True
+    # Private LAN ranges that won't resolve from another device's perspective
+    return hostname.startswith("10.") or hostname.startswith("192.168.") or hostname.startswith("172.")
+
+
+def _rehost_to_request(absolute_url: str, request):
+    """If an absolute URL points at a local/LAN host, swap its scheme+host for the
+    one the client actually used, keeping the path/query intact."""
+    if not request:
+        return absolute_url
+    try:
+        parsed = urlparse(absolute_url)
+    except ValueError:
+        return absolute_url
+    if not _is_local_host(parsed.hostname or ""):
+        return absolute_url
+    # Build "<scheme>://<host>" from the live request and graft the original path.
+    new_base = urlparse(request.build_absolute_uri("/"))
+    return urlunparse((new_base.scheme, new_base.netloc, parsed.path, parsed.params, parsed.query, parsed.fragment))
+
 
 def _abs_url(request, path):  # path: str | None
-    """Convert a relative media path to an absolute URL using the request or BACKEND_URL."""
+    """Convert a relative media path to an absolute URL using the request or BACKEND_URL.
+    Absolute URLs pinned to a local/LAN host are rewritten to the request's host."""
     if not path:
         return None
     if path.startswith("http"):
-        return path
+        return _rehost_to_request(path, request)
     if request:
         return request.build_absolute_uri(path)
     base = getattr(django_settings, "BACKEND_URL", "http://localhost:8000").rstrip("/")
@@ -101,6 +138,9 @@ class CommentSerializers(serializers.ModelSerializer):
             "user_id": {"required": False},
             "parent": {"required": False},
             "content": {"required": False},
+            # El video lo resuelve e inyecta la vista (acepta id o uuid), así que
+            # el serializer no debe validar el video_id crudo del request.
+            "video_id": {"required": False},
         }
 
     def get_user_id(self, obj):
@@ -164,6 +204,9 @@ class VideoZerializer(serializers.ModelSerializer):
     current_user_followered = serializers.SerializerMethodField()
     is_saved = serializers.SerializerMethodField()
     video_url = serializers.SerializerMethodField()
+    # `video` is what the frontend actually consumes, so it must also be a signed,
+    # expiring URL — never the raw /media/contenido/ path.
+    video = serializers.SerializerMethodField()
     thumbnail_url = serializers.SerializerMethodField()
     audio_track_url = serializers.SerializerMethodField()
     audio_track_cover = serializers.SerializerMethodField()
@@ -181,9 +224,19 @@ class VideoZerializer(serializers.ModelSerializer):
             "privacy", "is_saved",
         )
 
-    def get_video_url(self, obj):
+    def _signed_video_url(self, obj):
         request = self.context.get('request')
-        return _abs_url(request, obj.video_url or (obj.video.url if obj.video else None))
+        raw = obj.video_url or (obj.video.url if obj.video else None)
+        # Hand out a short-lived signed URL so copied/shared links stop working
+        # after the TTL. External (http) and empty values pass through unchanged.
+        signed = sign_media_path(raw) if raw else raw
+        return _abs_url(request, signed)
+
+    def get_video_url(self, obj):
+        return self._signed_video_url(obj)
+
+    def get_video(self, obj):
+        return self._signed_video_url(obj)
 
     def get_thumbnail_url(self, obj):
         request = self.context.get('request')
@@ -191,7 +244,12 @@ class VideoZerializer(serializers.ModelSerializer):
 
     def get_audio_track_url(self, obj):
         request = self.context.get('request')
-        return _abs_url(request, obj.audio_track_url)
+        # Firmar la pista igual que el video: una URL /media/ cruda es pública y
+        # permanente, así que cualquiera podía copiar y redescargar la canción para
+        # siempre. La firmamos con el mismo TTL → caduca como el video. El cliente
+        # re-firma (refresh-url) si vence en pleno uso.
+        signed = sign_media_path(obj.audio_track_url) if obj.audio_track_url else obj.audio_track_url
+        return _abs_url(request, signed)
 
     def get_audio_track_cover(self, obj):
         request = self.context.get('request')
@@ -271,11 +329,15 @@ class StoryMediaSerializer(serializers.ModelSerializer):
         return _abs_url(request, obj.file.url if obj.file else None)
 
 class GiftStorySerializer(serializers.ModelSerializer):
-    # user_liked = serializers.SerializerMethodField()
+    thumbnail = serializers.SerializerMethodField()
 
     class Meta:
         model = GiftStory
-        fields = ("name", "slug", "emoji", "video", "token_price", "is_active", "created_at")
+        fields = ("name", "slug", "emoji", "video", "thumbnail", "token_price", "is_active", "created_at")
+
+    def get_thumbnail(self, obj):
+        request = self.context.get('request')
+        return _abs_url(request, obj.thumbnail.url if obj.thumbnail else None)
 
     # def get_user_liked(self, obj):
     #     user = self.context.get('request').user
@@ -316,6 +378,7 @@ class VideoGiftReceivedSerializer(serializers.ModelSerializer):
     gift_emoji = serializers.CharField(source='gift.emoji', read_only=True)
     gift_video_url = serializers.SerializerMethodField()
     gift_color = serializers.CharField(source='gift.color_premiun', read_only=True)
+    gift_thumbnail = serializers.SerializerMethodField()
     video_thumbnail = serializers.SerializerMethodField()
 
     def get_gift_video_url(self, obj):
@@ -328,10 +391,16 @@ class VideoGiftReceivedSerializer(serializers.ModelSerializer):
         request = self.context.get('request')
         return _abs_url(request, obj.video.thumbnail_url if obj.video else None)
 
+    def get_gift_thumbnail(self, obj):
+        request = self.context.get('request')
+        if obj.gift and obj.gift.thumbnail:
+            return _abs_url(request, obj.gift.thumbnail.url)
+        return None
+
     class Meta:
         model = VideoGift
         fields = ['uuid', 'sender_username', 'sender_avatar', 'gift_name', 'gift_emoji',
-                  'gift_video_url', 'gift_color', 'video_thumbnail', 'created_at', 'is_seen', 'quantity', 'vip_message']
+                  'gift_video_url', 'gift_color', 'gift_thumbnail', 'video_thumbnail', 'created_at', 'is_seen', 'quantity', 'vip_message']
 
 
 class UserGiftReceivedSerializer(serializers.ModelSerializer):
@@ -366,6 +435,17 @@ class StorySerializer(serializers.ModelSerializer):
     total_views = serializers.SerializerMethodField()
     user = UserSerializers()
     formatted_created_at = serializers.SerializerMethodField()
+    # Firmar la pista de la story: /media/audio_tracks/ crudo está bloqueado, así que
+    # se sirve FIRMADA y expira como el resto. El campo del modelo guarda la ruta cruda.
+    audio_track_url = serializers.SerializerMethodField()
+
+    def get_audio_track_url(self, obj):
+        raw = obj.audio_track_url
+        if not raw:
+            return raw
+        request = self.context.get('request')
+        signed = sign_media_path(raw)
+        return _abs_url(request, signed)
 
     def get_total_views(self, obj):
         return obj.total_views()
@@ -628,7 +708,11 @@ class AudioTrackSerializer(serializers.ModelSerializer):
 
     def get_audio_url(self, obj):
         request = self.context.get('request')
-        return _abs_url(request, obj.audio_file.url if obj.audio_file else None)
+        # Firmar la pista del selector de música: /media/audio_tracks/ crudo está
+        # bloqueado (solo /media-signed/), así que esta URL DEBE ir firmada para que
+        # el reproductor del selector pueda sonar.
+        raw = obj.audio_file.url if obj.audio_file else None
+        return _abs_url(request, sign_media_path(raw) if raw else raw)
 
 
 class FavoriteTrackSerializer(serializers.ModelSerializer):

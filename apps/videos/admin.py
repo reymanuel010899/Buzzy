@@ -13,7 +13,12 @@ class GiftConfig(admin.ModelAdmin):
     list_display = ("id", "uuid")
     search_fields = ("uuid",)
 
-admin.site.register(models.Video)
+@admin.register(models.Video)
+class VideoAdmin(admin.ModelAdmin):
+    list_display = ("id", "uuid", "user_id", "status", "privacy", "media_type", "created_at")
+    list_filter = ("status", "privacy", "media_type")
+    search_fields = ("uuid", "description", "user_id__username")
+    raw_id_fields = ("user_id", "category")
 admin.site.register(models.Comment, GiftConfig)
 admin.site.register(models.Like)
 admin.site.register(models.Follower, FollowerConfig)
@@ -92,3 +97,10 @@ class AudioTrackAdmin(admin.ModelAdmin):
     def duration_display(self, obj):
         return obj.duration_display
     duration_display.short_description = 'Duración'
+
+admin.site.register(models.VideoGift, GiftConfig)
+admin.site.register(models.UserGift)
+admin.site.register(models.SavedVideo)
+admin.site.register(models.VideoStats)
+admin.site.register(models.AITemplate)
+admin.site.register(models.FavoriteTrack)

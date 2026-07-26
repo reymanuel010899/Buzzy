@@ -72,6 +72,7 @@ STRIPE_PUBLIC_KEY = os.getenv('STRIPE_PUBLIC_KEY', 'pk_test_placeholder')
 STRIPE_SECRET_KEY = os.getenv('STRIPE_SECRET_KEY', 'sk_test_placeholder')
 STRIPE_WEBHOOK_SECRET = os.getenv('STRIPE_WEBHOOK_SECRET', 'whsec_placeholder')
 FRONTEND_URL = os.getenv('FRONTEND_URL', 'http://localhost:5173')
+WEB_URL = os.getenv('WEB_URL', 'http://localhost:5173')
 PLAY_STORE_URL = os.getenv('PLAY_STORE_URL', 'https://play.google.com/store/apps/details?id=com.buzzy.app')
 
 # Social OAuth Credentials
@@ -90,9 +91,34 @@ MIDDLEWARE = [
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'apps.users.middleware.UserLanguageMiddleware',
+    'apps.users.rate_limit_middleware.RateLimitMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware'
 ]
+
+# ── Rate limiting ──────────────────────────────────────────────────────────
+# Global default: 10 requests per 10 seconds per (user/IP + path + method).
+# Override per-endpoint below. window = seconds, limit = max requests.
+RATE_LIMIT_ENABLED = True
+
+RATE_LIMIT_OVERRIDES = {
+    # Auth — strict: brute-force protection
+    "/api/login":             {"limit": 5,  "window": 60},
+    "/api/register":          {"limit": 5,  "window": 60},
+    "/api/google/login":      {"limit": 5,  "window": 60},
+    "/api/google/register":   {"limit": 5,  "window": 60},
+    "/api/token/refresh":     {"limit": 10, "window": 60},
+    # Payments — prevent double-submit
+    "/api/wallet/stripe":     {"limit": 3,  "window": 30},
+    "/api/ads/campaigns":     {"limit": 5,  "window": 30},
+    # Social actions — generous but capped
+    "/api/create-like":       {"limit": 30, "window": 10},
+    "/api/create-follower":   {"limit": 20, "window": 10},
+    "/api/create-comment":    {"limit": 15, "window": 10},
+    # Feed — allow normal browsing
+    "/api/recommendations":   {"limit": 20, "window": 10},
+    "/api/list-home":         {"limit": 20, "window": 10},
+}
 
 ROOT_URLCONF = 'Buzzy.urls'
 

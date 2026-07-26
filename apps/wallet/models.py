@@ -3,6 +3,8 @@ import uuid
 from apps.users.models import User
 from django.db.models.signals import post_save
 from django.dispatch import receiver
+from django.utils import timezone
+from dateutil.relativedelta import relativedelta
 
 class CurrencyModel(models.Model):
 
@@ -236,6 +238,27 @@ class GlobalSettings(models.Model):
         obj, created = cls.objects.get_or_create(id=1)
         return obj
 
+    def split_gift_tokens(self, token_price, fee_pct_override=None):
+        """Reparte un regalo en (fee_plataforma, tokens_receptor) usando enteros.
+
+        El receptor SIEMPRE recibe el resto exacto (total - fee), así la suma
+        cuadra con cualquier porcentaje y nunca se crean ni se pierden tokens.
+        El fee se redondea (half-up) para que la plataforma no pierda en impares.
+
+        `fee_pct_override`: si se pasa (ej. la tarifa de un Early Creator Bonus),
+        se usa en vez de la comisión global. Si es None, usa self.gift_fee_pct.
+
+        Ej: 3 tokens al 50% → fee=2 (round 1.5), receptor=1, suma=3.
+            5 tokens al 30% → fee=2 (round 1.5), receptor=3, suma=5.
+        """
+        from decimal import Decimal, ROUND_HALF_UP
+        total = int(token_price)
+        pct = Decimal(self.gift_fee_pct if fee_pct_override is None else fee_pct_override)
+        fee = int((Decimal(total) * pct / Decimal(100)).quantize(Decimal('1'), rounding=ROUND_HALF_UP))
+        fee = max(0, min(fee, total))  # nunca negativo ni mayor al total
+        receiver = total - fee
+        return fee, receiver
+
 
 class MonetizableViewLog(models.Model):
     """
@@ -314,3 +337,81 @@ class CreatorEarningsPeriod(models.Model):
 
     def __str__(self):
         return f"{self.creator.username} | {self.week_start} → {self.week_end} | ${self.net_amount} | {self.status}"
+
+
+class BonusCampaign(models.Model):
+    """Campaña 'Early Creator': las primeras `capacity` personas que lleguen a
+    `follower_threshold` seguidores ganan tarifas especiales por `duration_months`.
+    Al llenarse el cupo, la campaña deja de aceptar nuevos ganadores."""
+    name               = models.CharField(max_length=120)
+    follower_threshold = models.PositiveIntegerField(help_text="N: seguidores requeridos para ganar.")
+    capacity           = models.PositiveIntegerField(help_text="X: cupo de ganadores. Al llenarse, cierra.")
+    duration_months    = models.PositiveIntegerField(default=3, help_text="D: meses que dura el bono por ganador.")
+    gift_fee_pct       = models.DecimalField(
+        max_digits=5, decimal_places=2, default=30.00,
+        help_text="Comisión de regalos para los ganadores (reemplaza la global).")
+    view_rate_per_1000 = models.DecimalField(
+        max_digits=8, decimal_places=4, default='0.1000',
+        help_text="USD por 1000 vistas para los ganadores (reemplaza la global).")
+    is_active          = models.BooleanField(default=True)
+    created_at         = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = 'Bonus Campaign'
+        verbose_name_plural = 'Bonus Campaigns'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"{self.name} (N={self.follower_threshold}, X={self.capacity})"
+
+    @property
+    def winners_count(self):
+        return self.bonuses.count()
+
+    @property
+    def is_full(self):
+        return self.bonuses.count() >= self.capacity
+
+
+class CreatorBonusManager(models.Manager):
+    def active_for(self, user):
+        """Bono activo del usuario (expires_at > now), o None. Si hay varios,
+        gana el de MAYOR view_rate_per_1000 (más favorable), desempate por el
+        started_at más reciente. Gift-fee y view-rate salen de la misma fila."""
+        return (self.get_queryset()
+                .filter(user=user, expires_at__gt=timezone.now())
+                .order_by('-view_rate_per_1000', '-started_at')
+                .first())
+
+
+class CreatorBonus(models.Model):
+    """Un bono ganado por un usuario en una campaña. Las tarifas se snapshotean
+    al ganar, así editar la campaña después NO altera a los ganadores existentes."""
+    user                  = models.ForeignKey(User, on_delete=models.CASCADE, related_name='creator_bonuses')
+    campaign              = models.ForeignKey(BonusCampaign, on_delete=models.CASCADE, related_name='bonuses')
+    started_at            = models.DateTimeField(default=timezone.now)
+    expires_at            = models.DateTimeField()
+    gift_fee_pct          = models.DecimalField(max_digits=5, decimal_places=2)
+    view_rate_per_1000    = models.DecimalField(max_digits=8, decimal_places=4)
+    follower_count_at_win = models.PositiveIntegerField(default=0)
+    created_at            = models.DateTimeField(auto_now_add=True)
+
+    objects = CreatorBonusManager()
+
+    class Meta:
+        unique_together = ('user', 'campaign')
+        verbose_name = 'Creator Bonus'
+        verbose_name_plural = 'Creator Bonuses'
+        ordering = ['-created_at']
+        indexes = [models.Index(fields=['user', 'expires_at'])]
+
+    def __str__(self):
+        return f"{self.user.username} | {self.campaign.name} | expira {self.expires_at:%Y-%m-%d}"
+
+    @property
+    def is_active(self):
+        return self.expires_at > timezone.now()
+
+    @classmethod
+    def active_for(cls, user):
+        return cls.objects.active_for(user)

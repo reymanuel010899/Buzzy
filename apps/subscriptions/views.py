@@ -65,7 +65,7 @@ class CreateCheckoutSessionView(APIView):
                             'currency': 'usd',
                             'product_data': {
                                 'name': f"Buzzy {plan.name} Subscription to {subscribed_to.username}",
-                                'description': plan.description,
+                                **({'description': plan.description} if plan.description else {}),
                             },
                             'unit_amount': int(plan.price * 100),
                             'recurring': {

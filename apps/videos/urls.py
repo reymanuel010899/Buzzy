@@ -7,7 +7,6 @@ app_name = 'video'
 urlpatterns = [
     # MEDIA
     path("api/list-home/", views.ListMediaApiView.as_view(), name='media-home'),
-    path("api/videos/user/prefetch/", views.UserVideosBatchApiView.as_view(), name='user-videos-prefetch'),
     path("api/videos/user/<str:username>/", views.UserVideosApiView.as_view(), name='user-videos'),
     path("api/videos/create/", views.VideoUploadAPIView.as_view(), name='video-upload'),
     path('api/videos/saved/', views.SavedVideoView.as_view(), name='saved-videos'),
@@ -56,6 +55,7 @@ urlpatterns = [
     path("api/users/gifts/mark-seen/", views.MarkUserGiftsSeenView.as_view(), name="user-gifts-mark-seen"),
     path("api/stories/gifts/mark-seen/", views.MarkStoryGiftSeenView.as_view(), name="story-gifts-mark-seen"),
     path("api/stories/active/", views.ListActiveStoriesApiView.as_view()),
+    path("api/stories/by-media/<str:media_ref>/", views.StoryDetailByMediaApiView.as_view()),
     path("api/stories/user/<int:user_id>/", views.UserStoriesApiView.as_view()),
     path("api/stories/view/", views.ViewStoryApiView.as_view()),
     path("api/stories/<str:story_uuid>/viewers/", views.StoryViewersApiView.as_view()),
@@ -75,7 +75,6 @@ urlpatterns = [
     path('api/messages/forward/', views.ForwardMessageView.as_view(), name='forward-message'),
     path('api/update-online-status/', views.UpdateOnlineStatusView.as_view(), name='update-online-status'),
     path('api/social/connections/', views.UserConnectionsListView.as_view(), name='social-connections'),
-    path('api/messages/reaction/', views.SaveMessageReactionView.as_view(), name='save-reaction'),
     path('api/v1/users/update-device-token/', views.UpdateDeviceTokenView.as_view(), name='update-device-token'),
 
     # NOTIFICATIONS

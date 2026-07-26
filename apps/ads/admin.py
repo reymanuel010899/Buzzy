@@ -30,12 +30,23 @@ class AdReviewInline(admin.StackedInline):
 
 @admin.register(AdCampaign)
 class AdCampaignAdmin(admin.ModelAdmin):
-    list_display  = ['name', 'user', 'objective', 'status_badge', 'budget_info', 'spent_pct', 'created_at']
+    list_display  = ['name', 'user', 'kind', 'objective', 'status_badge', 'budget_info', 'spent_pct', 'created_at']
     list_filter   = ['status', 'objective', 'created_at']
     search_fields = ['name', 'user__username', 'user__email']
     readonly_fields = ['created_at', 'updated_at']
+    autocomplete_fields = ['promoted_video']
     inlines = [AdAudienceInline, AdCreativeInline, AdBudgetInline, AdReviewInline]
     actions = ['approve_campaigns', 'reject_campaigns', 'pause_campaigns', 'activate_campaigns']
+
+    def kind(self, obj):
+        if obj.promoted_video_id:
+            return format_html(
+                '<span style="background:#2563eb;color:#fff;padding:2px 8px;border-radius:12px;font-size:11px">📹 Boost</span>'
+            )
+        return format_html(
+            '<span style="background:#6b7280;color:#fff;padding:2px 8px;border-radius:12px;font-size:11px">Externo</span>'
+        )
+    kind.short_description = 'Tipo'
 
     def status_badge(self, obj):
         colors = {

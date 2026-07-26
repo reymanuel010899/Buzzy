@@ -103,7 +103,7 @@ def settle_weekly_earnings():
     El contador acumulado VideoStats.monetizable_views NO se toca —
     el delta diario es la única fuente de verdad para pagos.
     """
-    from apps.wallet.models import VideoEarningsDaily, CreatorEarningsPeriod, GlobalSettings
+    from apps.wallet.models import VideoEarningsDaily, CreatorEarningsPeriod, GlobalSettings, CreatorBonus
     from django.db.models import Sum
     from django.contrib.auth import get_user_model
 
@@ -134,10 +134,35 @@ def settle_weekly_earnings():
         if total_views < MIN_VIEWS:
             continue
 
-        gross = Decimal(total_views) / Decimal('1000') * rate
-        net   = gross  # platform_fee_pct = 0 por ahora
-
         creator = User.objects.get(pk=row['creator'])
+
+        # Early Creator Bonus: la tarifa del bono solo aplica a las vistas
+        # GENERADAS DESPUÉS de ganar el bono (date >= started_at). Las vistas
+        # previas de la misma semana se pagan a la tarifa global. Por eso se
+        # separan en dos tramos por fecha en vez de aplicar una tarifa a todo.
+        _bonus = CreatorBonus.active_for(creator)
+        if _bonus:
+            # Inicio del tramo con tarifa de bono: el más tardío entre el inicio
+            # de la semana y la fecha en que ganó el bono.
+            bonus_from = max(week_start, _bonus.started_at.date())
+            views_after = (
+                VideoEarningsDaily.objects
+                .filter(creator=creator, date__gte=bonus_from, date__lte=week_end,
+                        already_settled=False)
+                .aggregate(s=Sum('views_delta'))['s'] or 0
+            )
+            views_before = total_views - views_after
+            gross = (
+                Decimal(views_before) / Decimal('1000') * rate +
+                Decimal(views_after) / Decimal('1000') * _bonus.view_rate_per_1000
+            )
+            # Tarifa "representativa" guardada en el period: la efectiva promedio.
+            effective_rate = (gross / Decimal(total_views) * Decimal('1000')) if total_views else rate
+        else:
+            effective_rate = rate
+            gross = Decimal(total_views) / Decimal('1000') * rate
+
+        net = gross  # platform_fee_pct = 0 por ahora
 
         with transaction.atomic():
             period, created = CreatorEarningsPeriod.objects.get_or_create(
@@ -146,7 +171,7 @@ def settle_weekly_earnings():
                 defaults={
                     'week_end': week_end,
                     'monetizable_views': total_views,
-                    'rate_per_1000': rate,
+                    'rate_per_1000': effective_rate,
                     'gross_amount': gross,
                     'platform_fee_pct': Decimal('0'),
                     'net_amount': net,

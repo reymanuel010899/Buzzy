@@ -609,14 +609,159 @@ def detect_category_multi(
 
 
 # ---------------------------------------------------------------------------
+# Video normalization  (standardize every upload for a smooth, consistent feed)
+# ---------------------------------------------------------------------------
+
+# Target spec for the vertical feed. Industry standard for TikTok/Reels-style apps.
+NORMALIZE_WIDTH  = 720
+NORMALIZE_HEIGHT = 1280
+NORMALIZE_CRF    = 23          # visually high quality, reasonable file size
+NORMALIZE_PRESET = "veryfast"  # good speed/size trade-off on a Celery worker
+# Mobile-decoder safety pins. The Android WebView hands H.264 to the device's
+# hardware decoder, whose pool is small and which rejects/falls-back-to-software
+# on exotic streams — which is what paints the video "in tiles" (macroblocks
+# appearing in chunks). Forcing a baseline-of-compatibility profile/level + a
+# capped fps and bitrate guarantees every clip stays on the hardware fast path:
+#   - profile=main, level=4.0  → universally hardware-decodable on Android
+#   - fps cap 30               → kills broken headers (e.g. mislabeled 1000fps)
+#   - maxrate/bufsize          → caps peak bitrate so weak decoders never stall
+#   - yuv420p                  → the only chroma format mobile decoders guarantee
+NORMALIZE_PROFILE = "main"
+NORMALIZE_LEVEL   = "4.0"
+NORMALIZE_FPS     = 30
+NORMALIZE_MAXRATE = "2500k"
+NORMALIZE_BUFSIZE = "5000k"
+
+
+def _probe_video_stream(video_path: str) -> dict:
+    """
+    Return {'width','height','codec','profile','fps'} for the first video stream.
+
+    profile/fps are included so callers can tell whether a clip is *truly* in the
+    mobile-safe format (not just the right resolution) — e.g. a 720x1280 h264 clip
+    can still be High-profile @1000fps, which tiles on Android. Best-effort.
+    """
+    try:
+        import json
+        raw = _run_ffprobe(
+            "-v", "error",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=width,height,codec_name,profile,avg_frame_rate",
+            "-of", "json",
+            video_path,
+        )
+        streams = json.loads(raw).get("streams", [])
+        if streams:
+            s = streams[0]
+            # avg_frame_rate comes as "30/1" (or "0/0" when unknown) — reduce to fps.
+            fps = 0.0
+            rate = s.get("avg_frame_rate") or "0/0"
+            try:
+                num, den = rate.split("/")
+                fps = (float(num) / float(den)) if float(den) else 0.0
+            except (ValueError, ZeroDivisionError):
+                fps = 0.0
+            return {
+                "width": int(s.get("width") or 0),
+                "height": int(s.get("height") or 0),
+                "codec": s.get("codec_name") or "",
+                "profile": (s.get("profile") or "").lower(),
+                "fps": fps,
+            }
+    except Exception as exc:
+        logger.debug("probe failed for %s: %s", video_path, exc)
+    return {"width": 0, "height": 0, "codec": "", "profile": "", "fps": 0.0}
+
+
+def normalize_video(video_path: str) -> bool:
+    """
+    Re-encode a video in place to a standard feed format:
+      - scaled to fit 720x1280 (no upscaling past it), letterboxed with black
+        padding so square/landscape clips don't get stretched or cropped,
+      - H.264 + yuv420p (max device compatibility),
+      - +faststart so playback starts immediately instead of "loading in chunks",
+      - normalized bitrate via CRF.
+
+    Returns True if the file was successfully replaced with the normalized one.
+    Best-effort: on any failure the original file is left untouched.
+    """
+    info = _probe_video_stream(video_path)
+    w, h = info["width"], info["height"]
+
+    # scale to fit inside the target box (keep aspect, never upscale beyond box),
+    # then pad to exactly WxH and center. force_original_aspect_ratio=decrease
+    # handles portrait, landscape and square sources uniformly.
+    vf = (
+        f"scale={NORMALIZE_WIDTH}:{NORMALIZE_HEIGHT}:"
+        f"force_original_aspect_ratio=decrease,"
+        f"pad={NORMALIZE_WIDTH}:{NORMALIZE_HEIGHT}:(ow-iw)/2:(oh-ih)/2:color=black,"
+        f"setsar=1,"
+        # Re-time every frame to a constant {NORMALIZE_FPS}fps. This both caps the
+        # rate AND rewrites broken timestamps (some sources report 1000fps in the
+        # header, which makes Android's decoder choke and render in tiles).
+        f"fps={NORMALIZE_FPS}"
+    )
+
+    base, _ext = os.path.splitext(video_path)
+    tmp_out = f"{base}.norm.mp4"
+
+    try:
+        _run_ffmpeg(
+            "-i", video_path,
+            "-vf", vf,
+            "-c:v", "libx264",
+            "-profile:v", NORMALIZE_PROFILE,   # main → hardware-decodable everywhere
+            "-level", NORMALIZE_LEVEL,         # 4.0  → safe for all modern Android
+            "-preset", NORMALIZE_PRESET,
+            "-crf", str(NORMALIZE_CRF),
+            "-maxrate", NORMALIZE_MAXRATE,     # cap peak bitrate so weak decoders
+            "-bufsize", NORMALIZE_BUFSIZE,     # never stall mid-GOP
+            "-pix_fmt", "yuv420p",
+            "-c:a", "aac",
+            "-b:a", "128k",
+            "-ac", "2",                        # stereo: avoids mono-channel quirks
+            "-movflags", "+faststart",
+            tmp_out,
+            timeout=FFMPEG_TIMEOUT,
+        )
+    except Exception as exc:
+        logger.warning("normalize_video failed for %s (%dx%d): %s", video_path, w, h, exc)
+        try:
+            if os.path.exists(tmp_out):
+                os.remove(tmp_out)
+        except Exception:
+            pass
+        return False
+
+    # Atomically replace the original with the normalized version.
+    try:
+        os.replace(tmp_out, video_path)
+        logger.info("normalize_video OK: %s (%dx%d -> %dx%d)",
+                    video_path, w, h, NORMALIZE_WIDTH, NORMALIZE_HEIGHT)
+        return True
+    except Exception as exc:
+        logger.warning("normalize_video could not replace original %s: %s", video_path, exc)
+        try:
+            if os.path.exists(tmp_out):
+                os.remove(tmp_out)
+        except Exception:
+            pass
+        return False
+
+
+# ---------------------------------------------------------------------------
 # Thumbnail generation  (picks best of 3 candidate frames)
 # ---------------------------------------------------------------------------
 
 
 def generate_thumbnail(video_path: str, video_uuid: str) -> Optional[str]:
     """
-    Extracts 3 candidate frames (1s, 25%, 50%) and picks the one with
-    highest brightness variance (avoids black/overexposed frames).
+    Generate the poster image for the feed.
+
+    The poster MUST match the first frame the user sees on play, otherwise there's
+    a visible "jump" in brightness/scene when the video starts. So we take the
+    opening frame (~0.1s, skipping any pure-black leader) at full resolution and
+    only fall back to a mid-video frame if the opening one is essentially black.
     Returns the relative URL path under MEDIA_URL.
     """
     thumb_dir = os.path.join(settings.MEDIA_ROOT, "thumbnails")
@@ -626,11 +771,9 @@ def generate_thumbnail(video_path: str, video_uuid: str) -> Optional[str]:
     if duration == 0:
         duration = 10  # fallback
 
-    candidates = [
-        max(1, int(duration * 0.10)),
-        max(1, int(duration * 0.25)),
-        max(1, int(duration * 0.50)),
-    ]
+    # Prefer the opening frame so the poster == the frame playback starts on.
+    # Keep a couple of fallbacks only for the rare case the intro is black.
+    candidates = [0.1, 0.5, max(1, int(duration * 0.25))]
     best_path: Optional[str] = None
     best_score: float = -1.0
 
@@ -642,7 +785,7 @@ def generate_thumbnail(video_path: str, video_uuid: str) -> Optional[str]:
                     "-ss", str(ts),
                     "-i", video_path,
                     "-vframes", "1",
-                    "-q:v", "2",
+                    "-q:v", "2",  # high-quality JPEG at the video's own resolution
                     cand_path,
                     timeout=30,
                 )
@@ -654,6 +797,11 @@ def generate_thumbnail(video_path: str, video_uuid: str) -> Optional[str]:
                 continue
 
             score = _image_variance(cand_path)
+            # The opening frame (i == 0) is what we want; accept it unless it's
+            # nearly black (very low variance). Otherwise fall through to fallbacks.
+            if i == 0 and score >= 8.0:
+                best_path, best_score = cand_path, score
+                break
             if score > best_score:
                 best_score = score
                 best_path = cand_path
@@ -975,6 +1123,14 @@ def process_video_ai(self, video_id: int) -> str:
         _inc_counter("video_rejected_total", {"reason": "preflight"})
         _finalize_video(video, is_safe=False, label=rejection_reason)
         return f"Video {video_id} rejected: {rejection_reason}"
+
+    # ──────────────────────────────────────────────────────────────────────
+    # 2b. Normalize to the standard feed format (720x1280, faststart, padded).
+    # Done BEFORE the thumbnail so the poster matches the normalized video, and
+    # so every clip in the feed plays back smoothly at a consistent size.
+    # ──────────────────────────────────────────────────────────────────────
+    if normalize_video(video_path):
+        _inc_counter("video_normalized_total", {"task": "process_video_ai"})
 
     # ──────────────────────────────────────────────────────────────────────
     # 3 + 4. Audio extraction & transcription + NSFW text scoring

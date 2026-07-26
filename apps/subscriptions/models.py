@@ -34,9 +34,14 @@ class SubscriptionBenefit(models.Model):
     benefit_type = models.CharField(max_length=20, choices=BENEFIT_TYPES)
     limit = models.PositiveIntegerField(help_text="0 para ilimitado, o un número específico")
     description = models.CharField(max_length=255, blank=True, null=True)
+    order = models.PositiveIntegerField(
+        default=0,
+        help_text="Orden de aparición en la tarjeta del plan (menor = primero)."
+    )
 
     class Meta:
         verbose_name='Beneficio de suscripcion'
+        ordering = ['order', 'id']
         #unique_together = ('plan', 'benefit_type')
 
     def __str__(self):

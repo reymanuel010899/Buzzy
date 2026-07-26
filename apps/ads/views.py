@@ -127,50 +127,89 @@ class AdCampaignViewSet(viewsets.ModelViewSet):
             user_lng = None
 
         active = []
-        for campaign in AdCampaign.objects.select_related('audience', 'budget').all():
+        import logging
+        logger = logging.getLogger('ads.serve')
+        # select_related promoted_video + su autor para no hacer N+1 al serializar boosts.
+        all_campaigns = (
+            AdCampaign.objects
+            .select_related('audience', 'budget', 'promoted_video', 'promoted_video__user_id')
+            .all()
+        )
+        logger.warning(f"[ADS SERVE] user={user} total_campaigns={all_campaigns.count()} user_lat={user_lat} user_lng={user_lng}")
+
+        for campaign in all_campaigns:
             if not campaign.is_active:
+                logger.warning(f"[ADS SERVE] SKIP campaign={campaign.id} '{campaign.name}' reason=not_active status={campaign.status}")
+                continue
+
+            # No mostrarle a un autor su propio boost (además, sus impresiones no se cobran).
+            if campaign.user_id == user.id:
+                logger.warning(f"[ADS SERVE] SKIP campaign={campaign.id} reason=own_campaign")
+                continue
+
+            # Boost cuyo video fue borrado (promoted_video quedó NULL): no se puede servir.
+            if campaign.promoted_video_id is None and not hasattr(campaign, 'creative'):
+                logger.warning(f"[ADS SERVE] SKIP campaign={campaign.id} reason=no_content")
                 continue
 
             aud = getattr(campaign, 'audience', None)
             bud = getattr(campaign, 'budget', None)
             if not aud or not bud:
+                logger.warning(f"[ADS SERVE] SKIP campaign={campaign.id} reason=no_audience_or_budget")
                 continue
 
-            # 1. Location targeting — geo-radius OR country list (at least one must pass)
-            has_geo_target     = aud.latitude and aud.longitude
-            has_country_target = isinstance(aud.locations, list) and len(aud.locations) > 0
+            # 1. Location targeting
+            # - If viewer shared GPS → use precise geo-radius check.
+            # - If viewer did NOT share GPS → skip geo-radius (can't confirm exclusion); show ad.
+            # - Country/text fallback: only if GPS confirmed mismatch is not available.
+            # - Locations list containing only "Mi Ubicación Actual" → no restriction, show to all.
+            #
+            # Boost de video propio: SIN segmentación geográfica — se muestra a todos
+            # los usuarios de cualquier lugar, así que omitimos el filtro de ubicación.
+            has_geo_target     = (not campaign.is_boost) and bool(aud.latitude and aud.longitude)
+            real_locs = [] if campaign.is_boost else [loc for loc in (aud.locations or []) if loc and loc.strip() != "Mi Ubicación Actual"]
+            has_country_target = bool(real_locs)
 
             if has_geo_target or has_country_target:
                 location_ok = False
 
-                # 1a. Geo-radius check — uses pre-parsed user_lat/user_lng
-                if has_geo_target and user_lat is not None and user_lng is not None:
-                    try:
-                        dist = haversine_distance(user_lat, user_lng,
-                                                  float(aud.latitude), float(aud.longitude))
-                        if dist <= float(aud.radius or 50):
-                            location_ok = True
-                    except (ValueError, TypeError):
-                        pass
+                if has_geo_target:
+                    if user_lat is not None and user_lng is not None:
+                        # Viewer shared GPS — check radius
+                        try:
+                            dist = haversine_distance(user_lat, user_lng,
+                                                      float(aud.latitude), float(aud.longitude))
+                            if dist <= float(aud.radius or 50):
+                                location_ok = True
+                        except (ValueError, TypeError):
+                            location_ok = True  # parse error → don't exclude
+                    else:
+                        # Viewer has no GPS → can't verify distance; show the ad
+                        location_ok = True
 
-                # 1b. Country/city name match against user.country
                 if not location_ok and has_country_target:
                     user_country = getattr(user, 'country', None)
-                    if user_country:
+                    if not user_country:
+                        location_ok = True  # unknown country → show
+                    else:
                         country_name = getattr(user_country, 'name', str(user_country)).lower()
-                        normalized_locs = [loc.lower() for loc in aud.locations
-                                           if loc != "Mi Ubicación Actual"]
-                        if any(country_name in loc or loc in country_name
-                               for loc in normalized_locs):
+                        if any(country_name in loc.lower() or loc.lower() in country_name
+                               for loc in real_locs):
                             location_ok = True
 
+                if not location_ok and not has_geo_target and not has_country_target:
+                    # Only placeholder entries → show to everyone
+                    location_ok = True
+
                 if not location_ok:
-                    continue  # user is outside all targeted locations
+                    logger.warning(f"[ADS SERVE] SKIP campaign={campaign.id} reason=location user_country={getattr(user,'country',None)} real_locs={real_locs} has_geo={has_geo_target} user_gps={user_lat},{user_lng}")
+                    continue
 
             # 3. Daily budget cap
             daily_target = bud.daily_budget * 700
             analytics = AdAnalytics.objects.filter(campaign=campaign, date=today).first()
             if analytics and analytics.impressions >= daily_target:
+                logger.warning(f"[ADS SERVE] SKIP campaign={campaign.id} reason=daily_budget_cap impressions={analytics.impressions} target={daily_target}")
                 continue
 
             # 4. Frequency cap per user per day
@@ -179,12 +218,15 @@ class AdCampaignViewSet(viewsets.ModelViewSet):
                     campaign=campaign, user=user, date=today
                 ).first()
                 if freq and freq.view_count >= aud.max_frequency:
+                    logger.warning(f"[ADS SERVE] SKIP campaign={campaign.id} reason=frequency_cap views={freq.view_count} max={aud.max_frequency}")
                     continue
 
+            logger.warning(f"[ADS SERVE] PASS campaign={campaign.id} '{campaign.name}'")
             active.append(campaign)
 
         random.shuffle(active)
         result = active[:5]
+        logger.warning(f"[ADS SERVE] returning {len(result)} ads to user={user}")
         return Response(self.get_serializer(result, many=True).data)
 
     # ── Track impression ──────────────────────
@@ -200,22 +242,21 @@ class AdCampaignViewSet(viewsets.ModelViewSet):
 
         today = timezone.now().date()
 
-        # Unique lifetime impression (deduplication)
-        impression, created = AdImpression.objects.get_or_create(campaign=campaign, user=user)
-        if not created:
-            freq, _ = AdDailyFrequency.objects.get_or_create(
-                campaign=campaign, user=user, date=today
-            )
-            AdDailyFrequency.objects.filter(pk=freq.pk).update(view_count=F('view_count') + 1)
-            return Response({'status': 'already_tracked'})
+        # El frontend solo llama a este endpoint cuando el usuario vio el anuncio
+        # el tiempo mínimo (>= MIN_VIEW_SECONDS), aunque haya scrolleado/cerrado la
+        # app antes de poder saltarlo. Por tanto, toda impresión que llega aquí es
+        # facturable: cuenta para frecuencia, analytics y cobra al anunciante.
+
+        # Frequency tracking — anti-spam por usuario/día.
+        freq, _ = AdDailyFrequency.objects.get_or_create(campaign=campaign, user=user, date=today)
+        AdDailyFrequency.objects.filter(pk=freq.pk).update(view_count=F('view_count') + 1)
+
+        # Lifetime dedup: marca que este usuario ya recibió esta campaña alguna vez.
+        AdImpression.objects.get_or_create(campaign=campaign, user=user)
 
         # Record analytics
         analytics, _ = AdAnalytics.objects.get_or_create(campaign=campaign, date=today)
         AdAnalytics.objects.filter(pk=analytics.pk).update(impressions=F('impressions') + 1)
-
-        # Frequency tracking
-        freq, _ = AdDailyFrequency.objects.get_or_create(campaign=campaign, user=user, date=today)
-        AdDailyFrequency.objects.filter(pk=freq.pk).update(view_count=F('view_count') + 1)
 
         # Deduct budget — atomic to prevent race condition
         bud = getattr(campaign, 'budget', None)
@@ -633,7 +674,7 @@ class AdCampaignViewSet(viewsets.ModelViewSet):
                 mode='payment',
                 success_url=(
                     frontend_url
-                    + f'/ads?success=true&campaign_id={campaign.id}&session_id={{CHECKOUT_SESSION_ID}}'
+                    + f'/ads/campaign-success?campaign_id={campaign.id}&session_id={{CHECKOUT_SESSION_ID}}'
                 ),
                 cancel_url=(
                     frontend_url + f'/ads?canceled=true&campaign_id={campaign.id}'

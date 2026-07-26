@@ -357,6 +357,9 @@ class GoogleLoginView(APIView):
                     "profile_picture": _abs_media(user.profile_picture.url if user.profile_picture else None) or (profile_pic_url or settings.BACKEND_URL.rstrip('/') + '/media/profile_pics/avatar.webp'),
                     "country": getattr(user.country, 'code', None),
                     "is_buzzy_premium": getattr(user, 'buzzy_premium', None) is not None and user.buzzy_premium.is_active,
+                    # Sin esto el modal de onboarding (país+teléfono) reaparece en
+                    # cada login con Google aunque ya se haya completado.
+                    "onboarding_completed": user.onboarding_completed,
                 }
             }, status=status.HTTP_200_OK)
         except Exception as e:
@@ -651,6 +654,9 @@ class MediaByUser(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, username):
+        from django.db.models import Q
+        from apps.videos.models import Follower
+
         try:
             user = User.objects.get(username=username)
         except User.DoesNotExist:
@@ -658,7 +664,28 @@ class MediaByUser(APIView):
                 user = User.objects.get(is_owner=True)
             except User.DoesNotExist:
                 return Response({"error": "Usuario no encontrado"}, status=status.HTTP_404_NOT_FOUND)
+
         media = Video.objects.filter(user_id=user)
+
+        # El dueño ve todos sus videos (incluye privados y suscriptores → sus
+        # pestañas público/seguidores/suscriptores/privado). Un visitante solo ve
+        # públicos; los de 'seguidores' si sigue al autor; los de 'suscriptores'
+        # si está suscrito activamente. Nunca privados.
+        if request.user != user:
+            from apps.subscriptions.models import UserSubscription
+            viewer_follows_author = Follower.objects.filter(
+                user_id=request.user, follower_user_id=user
+            ).exists()
+            viewer_subscribes_author = UserSubscription.objects.filter(
+                subscriber=request.user, subscribed_to=user, is_active=True
+            ).exists()
+            allowed = Q(privacy='public')
+            if viewer_follows_author:
+                allowed |= Q(privacy='followers')
+            if viewer_subscribes_author:
+                allowed |= Q(privacy='subscribers')
+            media = media.filter(allowed)
+
         serialised_user = self.serializer_class(media, many=True, context={'request': request})
         return Response({
             "media_user":  serialised_user.data,
@@ -1645,3 +1672,40 @@ class RegisterDeviceView(APIView):
             {"registered": True, "created": created},
             status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
         )
+
+
+class NotificationSoundPrefsView(APIView):
+    """Get/update the per-category notification SOUND preferences.
+
+    The notification itself always arrives; these flags only control whether the
+    push plays a sound. Body accepts any subset of: messages, gifts, followers.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        u = request.user
+        return Response({
+            "messages": u.notif_sound_messages,
+            "gifts": u.notif_sound_gifts,
+            "followers": u.notif_sound_followers,
+        })
+
+    def post(self, request):
+        u = request.user
+        mapping = {
+            "messages": "notif_sound_messages",
+            "gifts": "notif_sound_gifts",
+            "followers": "notif_sound_followers",
+        }
+        updated = []
+        for key, field in mapping.items():
+            if key in request.data:
+                setattr(u, field, bool(request.data[key]))
+                updated.append(field)
+        if updated:
+            u.save(update_fields=updated)
+        return Response({
+            "messages": u.notif_sound_messages,
+            "gifts": u.notif_sound_gifts,
+            "followers": u.notif_sound_followers,
+        })
